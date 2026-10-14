@@ -115,6 +115,7 @@ class AcceptCredentialDialog(LocksmithDialog):
             title="Accept Credential",
             title_icon=":/assets/material-icons/in-badge.svg",
             content=content_widget,
+            initial_focus=self.browse_button,
             buttons=button_row,
             show_overlay=False
         )

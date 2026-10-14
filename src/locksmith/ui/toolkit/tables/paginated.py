@@ -208,6 +208,11 @@ class PaginatedTableWidget(QWidget):
 
         logger.info(f"PaginatedTableWidget initialized: title='{title}', columns={len(self.columns)}")
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Opening a list should not start text entry. Tab still reaches search.
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _setup_table(self):
         """Setup table widget configuration and styling."""
         # Set column count

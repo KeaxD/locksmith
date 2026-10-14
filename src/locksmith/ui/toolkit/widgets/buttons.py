@@ -4,10 +4,10 @@ locksmith.ui.toolkit.widgets.buttons module
 
 This module contains reusable custom button widget components.
 """
-from PySide6.QtCore import Qt, QSize, Signal, QPoint
+from PySide6.QtCore import Qt, QSize, Signal, QPoint, QTimer, QVariantAnimation, QEasingCurve
 from PySide6.QtGui import QIcon, QColor, QPixmap, QPainter, QCursor
 from PySide6.QtWidgets import QToolButton, QVBoxLayout, QPushButton, QRadioButton, QCheckBox, QApplication, QHBoxLayout, \
-    QLabel, QFrame, QGraphicsOpacityEffect, QWidget
+    QLabel, QFrame, QGraphicsOpacityEffect, QWidget, QStyle, QStyleOptionToolButton, QStylePainter
 
 from locksmith.ui import colors
 
@@ -548,6 +548,27 @@ class LocksmithCopyButton(LocksmithIconButton):
         )
 
         self._copy_content = copy_content
+        self._copy_tooltip = tooltip
+        self._check_icon = QIcon(":/assets/material-icons/check_dark.svg")
+        self.setAccessibleName(tooltip)
+        self.setStyleSheet(self.styleSheet() + f"""
+            QToolButton:hover, QToolButton:focus {{
+                background-color: {colors.BACKGROUND_SELECTION};
+            }}
+            QToolButton:pressed {{
+                background-color: {colors.BACKGROUND_HIGHLIGHT};
+            }}
+        """)
+        self._feedback = QVariantAnimation(self)
+        self._feedback.setDuration(140)
+        self._feedback.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._feedback.setStartValue(0.0)
+        self._feedback.setEndValue(0.0)
+        self._feedback.valueChanged.connect(lambda _: self.update())
+        self._reset_timer = QTimer(self)
+        self._reset_timer.setSingleShot(True)
+        self._reset_timer.setInterval(1500)
+        self._reset_timer.timeout.connect(self._reset_copy_feedback)
 
         # Connect click signal to copy action
         self.clicked.connect(self._copy_to_clipboard)
@@ -557,6 +578,38 @@ class LocksmithCopyButton(LocksmithIconButton):
         if self._copy_content:
             clipboard = QApplication.clipboard()
             clipboard.setText(self._copy_content)
+            self.setToolTip("Copied")
+            self.setAccessibleDescription("Copied")
+            self._animate_feedback(1.0)
+            self._reset_timer.start()
+
+    def _animate_feedback(self, value):
+        self._feedback.stop()
+        self._feedback.setStartValue(self._feedback.currentValue())
+        self._feedback.setEndValue(value)
+        self._feedback.start()
+
+    def _reset_copy_feedback(self):
+        self._reset_timer.stop()
+        self.setToolTip(self._copy_tooltip)
+        self.setAccessibleDescription("")
+        self._animate_feedback(0.0)
+
+    def paintEvent(self, event):
+        """Crossfade the icons without moving the button or its neighbors."""
+        option = QStyleOptionToolButton()
+        self.initStyleOption(option)
+        option.icon = QIcon()
+        painter = QStylePainter(self)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ToolButton, option)
+        rect = QStyle.alignedRect(self.layoutDirection(), Qt.AlignmentFlag.AlignCenter,
+                                  self.iconSize(), self.rect())
+        mode = QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled
+        progress = self._feedback.currentValue()
+        painter.setOpacity(1.0 - progress)
+        self.icon().paint(painter, rect, Qt.AlignmentFlag.AlignCenter, mode)
+        painter.setOpacity(progress)
+        self._check_icon.paint(painter, rect, Qt.AlignmentFlag.AlignCenter, mode)
 
     def set_copy_content(self, content: str):
         """
@@ -565,6 +618,8 @@ class LocksmithCopyButton(LocksmithIconButton):
         Args:
             content: The new text content to copy.
         """
+        if content != self._copy_content:
+            self._reset_copy_feedback()
         self._copy_content = content
 
     def get_copy_content(self) -> str:

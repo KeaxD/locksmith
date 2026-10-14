@@ -51,6 +51,11 @@ class WitnessAuthenticationMixin:
         - self.individual_witnesses: list
     """
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.passcode_fields:
+            next(iter(self.passcode_fields.values())).line_edit.setFocus()
+
     def _load_witness_info(self):
         """Load witness information from org contacts."""
         for wit_id in self.witness_ids:

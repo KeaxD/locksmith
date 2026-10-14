@@ -171,6 +171,7 @@ class CreateGroupIdentifierDialog(DelegationMixin, LocksmithDialog):
             parent=parent,
             title_content=title_widget,
             content=content_widget,
+            initial_focus=self.name_field.line_edit,
             buttons=button_row,
             show_overlay=False
         )

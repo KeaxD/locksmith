@@ -283,6 +283,6 @@ class LocksmithApplication:
         return sorted(
             path.name
             for path in rt_home.iterdir()
-            if path.is_dir()
+            if (path / 'data.mdb').is_file()
         )
         

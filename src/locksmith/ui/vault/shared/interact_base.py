@@ -92,6 +92,7 @@ class BaseInteractDialog(LocksmithDialog):
             title_content=title_content_widget,
             show_close_button=True,
             content=content_widget,
+            initial_focus=self.json_input,
             buttons=button_row,
             show_overlay=False
         )

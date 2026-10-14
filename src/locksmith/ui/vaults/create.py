@@ -109,6 +109,7 @@ class CreateVaultDialog(LocksmithDialog):
         super().__init__(
             parent=parent,
             title="Vault Initialization",
+            initial_focus=self.name_field.line_edit,
             title_content=title_content,
             show_close_button=True,
             content=content_widget,

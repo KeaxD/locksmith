@@ -5,6 +5,7 @@ locksmith.ui.vault.remotes.add module
 Dialog for connecting remote identifiers
 """
 import re
+from pathlib import Path
 from urllib import parse
 
 from PySide6.QtGui import QIcon
@@ -131,6 +132,7 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
             title_content=title_content_widget,
             show_close_button=True,
             content=content_widget,
+            initial_focus=self.oobi_field.line_edit,
             buttons=button_row,
             show_overlay=False
         )
@@ -174,6 +176,10 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
             "All Files (*)"
         )
         if file_path:
+            alias = self.alias_field.text().strip()
+            previous_name = Path(self.file_path_field.text()).stem
+            if not alias or alias == previous_name:
+                self.alias_field.setText(Path(file_path).stem)
             self.file_path_field.setText(file_path)
             self._extract_prefix_from_file(file_path)
 
