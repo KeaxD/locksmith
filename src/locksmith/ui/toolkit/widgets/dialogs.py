@@ -83,7 +83,8 @@ class LocksmithDialog(QDialog):
             content: QWidget | None = None,
             buttons: QHBoxLayout | None = None,
             show_overlay: bool = False,
-            margin_for_max_height: int = 40
+            margin_for_max_height: int = 40,
+            initial_focus: QWidget | None = None
     ):
         """
         Initialize the LocksmithDialog.
@@ -98,8 +99,10 @@ class LocksmithDialog(QDialog):
             buttons: Optional QHBoxLayout containing buttons to display at bottom.
             show_overlay: Whether to show overlay and make dialog modal (default True).
             margin_for_max_height: Margin (in pixels) to leave when calculating max height.
+            initial_focus: Input to focus when the dialog opens, if visible and enabled.
         """
         super().__init__(parent)
+        self._initial_focus = initial_focus
 
         if show_overlay:
             self.setModal(True)
@@ -447,6 +450,9 @@ class LocksmithDialog(QDialog):
         # Start fade animation (window opacity doesn't need the timing workarounds)
         self.setWindowOpacity(0.0)
         self.fade_animation.start()
+
+        if self._initial_focus is not None and self._initial_focus.isVisible() and self._initial_focus.isEnabled():
+            self._initial_focus.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def closeEvent(self, event):
         """Override closeEvent to clean up overlay."""
@@ -950,6 +956,7 @@ class LocksmithResourceDeletionDialog(LocksmithDialog):
         super().__init__(
             parent=parent,
             title=f"Delete {resource_type.title()}",
+            initial_focus=self.name_field.line_edit,
             title_icon=title_icon,
             show_close_button=True,
             content=content_widget,

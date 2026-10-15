@@ -830,7 +830,7 @@ class KFOnboardingPage(QWidget):
     def begin_run(self):
         self._run_in_progress = True
         self._progress_error = ""
-        self._progress_message = "Starting onboarding..."
+        self._progress_message = "Setting up your witnesses"
         self._boot_verified = False
         self._qr_results = []
         self._account_aid = self._current_account_aid()
@@ -839,7 +839,14 @@ class KFOnboardingPage(QWidget):
         self._apply_phase_visibility()
 
     def update_run(self, *, stage: str, detail: str, boot_verified=False, completed=False):
-        self._progress_message = detail
+        if completed or stage == "completed":
+            self._progress_message = "Setup complete"
+        elif stage in {"account_create", "complete"}:
+            self._progress_message = "Finishing setup"
+        elif stage in {"watcher_resolution", "watcher_binding"}:
+            self._progress_message = "Setting up your watcher"
+        else:
+            self._progress_message = "Setting up your witnesses"
         if stage == "bootstrap":
             self._boot_connected = True
             self._boot_detail = detail
@@ -875,9 +882,7 @@ class KFOnboardingPage(QWidget):
     def complete_run(self, *, account_aid: str, results: list[dict], batch_mode: bool):
         self._run_in_progress = False
         self._progress_error = ""
-        self._progress_message = (
-            "Onboarding is complete. Witness authenticator QR codes are ready below."
-        )
+        self._progress_message = "Setup complete"
         self._account_aid = account_aid
         self._qr_results = list(results)
         self._qr_batch_mode = batch_mode

@@ -85,6 +85,7 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
             title_content=title_content_widget,
             show_close_button=True,
             content=content_widget,
+            initial_focus=self.name_field.line_edit,
             buttons=button_row,
             show_overlay=False
         )

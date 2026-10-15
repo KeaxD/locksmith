@@ -838,17 +838,13 @@ class KFOnboardingService:
                 option=option,
                 watcher_required=bootstrap.watcher_required,
             ):
-                self._emit(
-                    progress,
-                    stage="session_provisioning",
-                    detail="Waiting for hosted resources",
-                )
                 start = await self._await_allocated_profile_async(
                     ehab=ehab,
                     start=start,
                     option=option,
                     watcher_required=bootstrap.watcher_required,
                     fallback_region_id=bootstrap.region_id,
+                    progress=progress,
                 )
 
             self._validate_allocated_profile(
@@ -1556,6 +1552,7 @@ class KFOnboardingService:
         option: BootstrapOption,
         watcher_required: bool,
         fallback_region_id: str,
+        progress: ProgressFn = None,
     ) -> OnboardingStartReply:
         deadline = asyncio.get_running_loop().time() + SESSION_PROVISION_TIMEOUT_SECONDS
         current = start
@@ -1576,6 +1573,16 @@ class KFOnboardingService:
                 raise OnboardingSessionPending(
                     "Hosted resource provisioning is still in progress"
                 )
+
+            if len(current.witnesses) < option.witness_count:
+                detail = "Creating your witness"
+                if option.witness_count > 1:
+                    detail = f"Creating witnesses ({len(current.witnesses)} of {option.witness_count} ready)"
+            elif watcher_required and current.watcher is None:
+                detail = "Creating your watcher"
+            else:
+                detail = "Finalizing hosted resources"
+            self._emit(progress, stage="session_provisioning", detail=detail)
 
             try:
                 current = await self._await_blocking_result(

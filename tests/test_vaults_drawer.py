@@ -16,12 +16,30 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtWidgets import QWidget
 
+from locksmith.core.apping import LocksmithApplication
+from locksmith.db.basing import LocksmithBaser
 from locksmith.ui.vaults import drawer as drawer_module
 from locksmith.ui.vaults.drawer import VaultDrawer
 
 # Deliberately not alphabetical: unfiltered, the list keeps the order the
 # application reports, and the filter imposes its own order on the matches.
 VAULTS = ["zeta", "megalith", "Gamma", "alpine", "gallium"]
+
+
+def test_vault_discovery_excludes_namespace_directories(tmp_path, monkeypatch):
+    for name, base in [('personal', ''), ('holder', 'demo-holder')]:
+        db = LocksmithBaser(name=name, base=base, headDirPath=str(tmp_path))
+        db.close()
+    root = tmp_path / LocksmithBaser.TailDirPath
+    (root / 'empty').mkdir()
+    monkeypatch.setattr(LocksmithBaser, 'TailDirPath', str(root))
+    monkeypatch.setattr(LocksmithBaser, 'AltTailDirPath', str(root))
+    app = LocksmithApplication(config=SimpleNamespace(base=''))
+
+    assert app.environments() == ['personal']
+    app.config.base = 'demo-holder'
+    assert app.environments() == ['holder']
+    assert (root / 'demo-holder' / 'holder' / 'data.mdb').is_file()
 
 
 @pytest.fixture

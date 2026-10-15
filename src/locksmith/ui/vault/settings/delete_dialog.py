@@ -94,6 +94,7 @@ class DeleteVaultDialog(LocksmithDialog):
             show_close_button=True,
             show_title_divider=True,
             content=content,
+            initial_focus=self.vault_name_input,
             buttons=buttons,
             show_overlay=True
         )

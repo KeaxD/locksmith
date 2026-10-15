@@ -310,6 +310,7 @@ class VaultDrawer(QWidget):
             self.toolbar_ref.raise_()
 
             self.vault_drawer.raise_()    # Bring drawer above overlay
+            self.vault_drawer.setFocus(Qt.FocusReason.OtherFocusReason)
 
             self.overlay_animation.setStartValue(0.0)
             self.overlay_animation.setEndValue(1.0)
