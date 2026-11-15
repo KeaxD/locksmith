@@ -9,6 +9,7 @@ from typing import Dict, Any, TYPE_CHECKING
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 from keri import help
+from keri.core import SerderACDC
 
 from locksmith.ui import colors
 from locksmith.core import credentialing
@@ -106,6 +107,14 @@ class IssuedCredentialsListPage(BaseListPage):
             issued_credentials_data = []
             creds = credentialing.credentials(self.app.vault, received=False)
 
+            pending = {}
+            for (request, key), record in self.app.vault.db.pending_issuances.getTopItemIter():
+                acdc = SerderACDC(raw=record.raw.encode())
+                pending[acdc.said] = (request, key)
+                if self.app.vault.db.issued.get((acdc.said,)) is None:
+                    schemer = self.app.vault.hby.db.schema.get((acdc.schema,))
+                    creds.append({'sad': acdc.sad, 'schema': schemer.sed if schemer else {},
+                                  'recipient': record.recipient, 'status': {'et': 'pending'}, 'created_at': ''})
             for credential in creds:
                 sad = credential['sad']
                 schemer = credential.get("schema") or {}
@@ -129,6 +138,9 @@ class IssuedCredentialsListPage(BaseListPage):
                     "SAID": sad['d'],
                     "_actions": actions,
                 }
+                if sad['d'] in pending:
+                    cred_dict['_pending_issuance'] = pending[sad['d']]
+                    cred_dict['_actions'] = ['Resume issuance']
                 issued_credentials_data.append(cred_dict)
 
             self.table.set_static_data(issued_credentials_data, reset_page=reset_page)
@@ -151,7 +163,12 @@ class IssuedCredentialsListPage(BaseListPage):
         credential_said = row_data.get('SAID', '')
         logger.info(f"Row action '{action}' triggered for: {credential_schema} -> {credential_recipient}")
 
-        if action == "View exchange history":
+        if row_data.get('_pending_issuance') and action in ('View', 'Resume issuance'):
+            request, key = row_data['_pending_issuance']
+            dialog = IssueCredentialDialog(self.app, self.parent, request_said=None if request == 'direct' else request,
+                                           resume=key)
+            dialog.open()
+        elif action == "View exchange history":
             self.parent.show_credential_activity(credential_said, received=False)
         elif action == "Offer":
             self.parent.start_credential_exchange('Offer', credential_said=credential_said)
@@ -241,11 +258,7 @@ class IssuedCredentialsListPage(BaseListPage):
         if doer_name == 'RegistryEvidence' and event_type == 'status_checked':
             self._load_issued_credentials_data()
 
-        # Refresh list when a credential is issued
-        if doer_name == "IssueCredentialDoer" and event_type == "credential_issued":
-            logger.info(
-                f"Credential issued: {data.get('schema_title', data.get('schema_said'))}, refreshing list"
-            )
+        if doer_name == "IssueCredentialDoer" and event_type in ("credential_issued", "credential_issuance_failed"):
             self._load_issued_credentials_data()
 
         # Refresh list when a credential is revoked

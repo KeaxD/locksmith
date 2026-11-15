@@ -13,10 +13,9 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QFileDialog, QCheckBox
 
 from locksmith import resources_rc  # noqa: F401 - register bundled schemas and icons
-from locksmith.core.credentialing import LoadSchemaDoer
+from locksmith.core.credentialing import LoadSchemaDoer, builtin_schemas, request_schemas
 from locksmith.core import ipexing
 from locksmith.core.habbing import list_eligible_local_identifiers
-from locksmith.ui.vault.credentials.schema.catalog import builtin_schemas, request_schemas
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
     FloatingLabelLineEdit,

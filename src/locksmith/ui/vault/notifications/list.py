@@ -16,6 +16,7 @@ from keri.peer import exchanging
 from locksmith.core import ipexing
 from locksmith.ui import colors
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
+from locksmith.ui.vault.credentials.presentation import credential_name
 from locksmith.ui.vault.credentials.received.accept_grant import AcceptGrantDialog
 
 if TYPE_CHECKING:
@@ -343,20 +344,16 @@ class NotificationsListPage(QWidget):
         if route == '/ipex/grant':
             credential = ipexing.grant_credential(self.app.vault, exn.said)
             schema = credential.schema
-            title = (schema.get('title') if isinstance(schema, dict)
-                     else self._resolve_schema_title(schema))
-            message = f"Credential grant: {title or 'Unknown Schema'}"
+            if isinstance(schema, str):
+                schemer = self.app.vault.hby.db.schema.get(keys=(schema,))
+                schema = schemer.sed if schemer else None
+            message = f"Credential grant: {credential_name(schema)}"
             responded, response = self._get_response_status(exn.said)
             if responded:
                 message += f" | {response}"
         if actual_message:
             message += f" | {actual_message}"
         return verb, message
-
-    def _resolve_schema_title(self, schema_said: str) -> str | None:
-        """Read the schema title from the vault's shared schema cache."""
-        schemer = self.app.vault.hby.db.schema.get(keys=(schema_said,))
-        return schemer.sed.get('title') if schemer is not None else None
 
     def _get_response_status(self, exn_said: str) -> tuple[bool, str | None]:
         """

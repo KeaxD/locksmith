@@ -9,7 +9,7 @@ import uuid
 from hio.base import doing
 from hio.core.http import httping
 from keri import help, kering
-from keri.acdc import Registrar, ipexing, regeventing
+from keri.acdc import Registrar, evaluating, ipexing, regeventing
 from keri.app import agenting, forwarding
 from keri.app.habbing import GroupHab
 from keri.core import Aggor, Compactor, Saider, SealEvent, SerderACDC, SerderKERI, parsing
@@ -42,8 +42,16 @@ class IpexHandler(ipexing.IpexHandler):
                     self.hby.db.kevers[issuer]
                 except KeyError:
                     pass
-        return super().verify(serder, attachments=attachments, nests=nests,
-                              sscs=sscs, evidence=evidence)
+        try:
+            return super().verify(serder, attachments=attachments, nests=nests,
+                                  sscs=sscs, evidence=evidence)
+        except kering.MissingSchemaError as ex:
+            if serder.route == '/ipex/grant' and serder.sad.get('ri') in self.hby.prefixes:
+                said = ex.args[0]
+                if (schemer := credentialing.builtin_schemas().get(said)) is not None:
+                    self.hby.db.schema.put((said,), schemer)
+            # Keripy retains the Grant and retries all checks through its normal escrow.
+            raise
 
     def handle(self, serder, attachments=None, nests=None, sscs=None):
         if serder.pre not in self.hby.prefixes:
@@ -70,7 +78,7 @@ def _edge_nodes(sad):
             if 'n' in group:
                 yield group['n'], path + '_/'
                 continue
-            labels = ipexing.EdgeGroupLabels if nested else ipexing.EdgeSectionLabels
+            labels = evaluating.EdgeGroupLabels if nested else evaluating.EdgeSectionLabels
             groups.extend((node, path + label + '/', True)
                           for label, node in group.items() if label not in labels)
 
@@ -667,7 +675,7 @@ def exchanges(vault):
             sender, recipient = recipient, sender
         saids = {exn.said for exn in chain}
         expired = (expiry_error(vault, tip)
-                   if tip.route not in ('/ipex/admit', '/ipex/spurn') else None)
+                   if not problem and tip.route not in ('/ipex/admit', '/ipex/spurn') else None)
         problem = problem or expired or ''
         result.append(dict(root=root.said, messages=chain, sender=sender, recipient=recipient,
                            actions=responses(vault, tip) if not problem else [], problem=problem,

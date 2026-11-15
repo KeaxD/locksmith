@@ -27,15 +27,6 @@ def disclosure_schemas():
             for name in ('bespoke-presentation', 'core-identity', 'age')}
 
 
-def schema_vault(schemas):
-    records = {schema['$id']: SimpleNamespace(sed=schema) for schema in schemas.values()}
-    store = SimpleNamespace(get=lambda keys: records.get(keys[0]),
-                            getTopItemIter=lambda: (((said,), schema) for said, schema in records.items()))
-    return SimpleNamespace(hby=SimpleNamespace(db=SimpleNamespace(schema=store), habs={},
-        habByPre=lambda pre: SimpleNamespace(name=pre)),
-        org=SimpleNamespace(get=lambda pre: None, list=lambda: []))
-
-
 def choose(combo, value):
     index = combo.combo_box.findData(value)
     assert index >= 0
@@ -43,10 +34,10 @@ def choose(combo, value):
 
 
 def test_request_fields_have_distinct_names_and_no_private_values(qapp, disclosure_schemas):
-    fields = DisclosureFields(schema_vault(disclosure_schemas), disclosure_schemas['core-identity'])
+    fields = DisclosureFields(disclosure_schemas['core-identity'])
     labels = {label.text() for label in fields.findChildren(QLabel)} | {
         checkbox.text() for checkbox in fields.findChildren(QCheckBox)}
-    assert {'Given Name Block', 'Family Name Block', 'Birth Date Block'} <= labels
+    assert {'Given Name', 'Family Name', 'Birth Date'} <= labels
     assert not {'Yes', 'No', '—', 'Value'} & labels
     assert not fields.has_selection()
     assert not fields.request_notice.isHidden()
@@ -61,7 +52,7 @@ def test_holder_sees_every_claim_coupled_to_required_information(qapp, disclosur
     sad = {'a': {'d': 'attribute-commitment', 'u': 'attribute-blinder', 'i': 'holder-AID',
                  'rd': 'presentation-registry', 'primary': False,
                  'givenName': {'d': 'name-commitment', 'u': 'name-blinder', 'value': '<b>Alice</b>'}}}
-    fields = DisclosureFields(schema_vault(disclosure_schemas), disclosure_schemas['core-identity'], sad)
+    fields = DisclosureFields(disclosure_schemas['core-identity'], sad)
     labels = {label.text() for label in fields.findChildren(QLabel)}
     assert {'holder-AID', 'presentation-registry', 'No', '<b>Alice</b>'} <= labels
     assert 'Value' not in labels
@@ -77,7 +68,7 @@ def test_holder_sees_every_claim_coupled_to_required_information(qapp, disclosur
 def test_bespoke_request_keeps_choices_and_orders_source_links(qapp, disclosure_schemas):
     root, core, age = (disclosure_schemas[name] for name in ('bespoke-presentation', 'core-identity', 'age'))
     schemas = {schema['$id']: SimpleNamespace(sed=schema) for schema in disclosure_schemas.values()}
-    request = RequestDisclosure(schema_vault(disclosure_schemas), root, schemas)
+    request = RequestDisclosure(root, schemas)
     for slot, schema, path in (('age', age, 'A/over13'), ('core', core, 'a/givenName/value')):
         choose(request.add_information, slot)
         choose(request.links[slot]['selector'], schema['$id'])
@@ -156,7 +147,7 @@ def test_incomplete_link_blocks_send_and_root_switch_keeps_selection(qapp, walle
     choices = [reopened.selection.combo_box.itemData(i) for i in range(reopened.selection.count())]
     assert choices.count(root['$id']) == choices.count(core['$id']) == choices.count(custom.said) == 1
     choose(reopened.selection, custom.said)
-    assert reopened._requests[custom.said].schema == custom.sed
+    assert any('Nickname' in label.text() for label in reopened.preview.findChildren(QLabel))
 
 
 def test_unsolicited_offer_sends_only_explicit_choices_and_keeps_original(wallet):
@@ -188,11 +179,11 @@ def test_unsolicited_offer_sends_only_explicit_choices_and_keeps_original(wallet
                        if said not in before]
         credentials.append(credential)
     first, other = credentials
-    # An existing credential gets the issuance shortcut without a creation callback.
     all_fields = DisclosureSelection(app.vault, first.said)
     assert all_fields.selected_fields() == {'/': []}
-    assert all_fields.select_all_issuance.text() == 'Select all for credential issuance'
-    all_fields.select_all_issuance.click()
+    select_all = all_fields.field_widgets['/'].select_all
+    assert select_all.text() == 'Select all'
+    select_all.click()
     full_plan, _, full_nodes = all_fields.prepare()
     assert set(full_plan[0][0][2]) == {'a/i', 'a/name/value', 'a/birthDate/value'}
     assert full_nodes[first.said]['a']['name']['value'] == 'Alice'

@@ -139,7 +139,6 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
                 row.addWidget(LocksmithCopyButton(copy_content=pre))
                 details.addLayout(row)
         self._build_said_section(details)
-        self._build_schema_section(details)
         self._build_credential_content_section(details)
         verification.set_content_layout(details)
         layout.addWidget(verification)
@@ -168,19 +167,6 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         self.said_field.setCursorPosition(0)
         self.said_field.setMinimumWidth(420)
         layout.addWidget(self.said_field)
-
-    def _build_schema_section(self, layout):
-        """Build the schema section."""
-        schema_label = QLabel("Schema")
-        schema_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(schema_label)
-
-        self.schema_field = LocksmithLineEdit("Schema")
-        self.schema_field.setText(self.schema_title)
-        self.schema_field.setReadOnly(True)
-        self.schema_field.setCursorPosition(0)
-        self.schema_field.setMinimumWidth(420)
-        layout.addWidget(self.schema_field)
 
     def _build_issuer_section(self, layout):
         """Build the issuer section."""

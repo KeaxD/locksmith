@@ -6,7 +6,7 @@ locksmith.core.basing package
 
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from keri.core import SerderACDC
 from keri.db import dbing, koming, subing
@@ -67,6 +67,15 @@ class IssuedCredential:
     stream: str = ''
     witness_threshold: int = 0
     created_at: str = ''
+
+
+@dataclass
+class PendingIssuance:
+    raw: str
+    recipient: str | None
+    inception: str = ''
+    salt: str = ''
+    anchors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -188,6 +197,7 @@ class LocksmithBaser(dbing.LMDBer):
         # credentials refer to the evidence retained by Keripy's exchange store.
         self.issuers = subing.Suber(db=self, subkey='issuers.')
         self.issued = koming.Komer(db=self, subkey='issued.', klas=IssuedCredential)
+        self.pending_issuances = koming.Komer(db=self, subkey='pendingIssuances.', klas=PendingIssuance)
         self.accepted = koming.Komer(db=self, subkey='accepted.', klas=AcceptedCredential)
         self.receipts = koming.Komer(db=self, subkey='receipts.', klas=GrantReceipt)
         self.proofing = koming.Komer(db=self, subkey='proofing.', klas=ProofingSession)
@@ -199,6 +209,8 @@ class LocksmithBaser(dbing.LMDBer):
         # Private presentation proofs: one returned blinder/update per (Grant, registry).
         self.presentations = koming.Komer(db=self, subkey='prpf.', klas=PresentationProof)
         self.outbox = koming.Komer(db=self, subkey='outbox.', klas=IpexSubmission)
+        # Activity history choice per exchange root and direction, valid for one message tip.
+        self.archived_exchanges = subing.Suber(db=self, subkey='archivedExchanges.')
         self.inbox = koming.Komer(db=self, subkey='inbox.', klas=MailboxFrame)
         self.mailboxMigrations = koming.Komer(db=self, subkey='mailboxMigrations.', klas=MailboxMigration)
         self.connections = koming.Komer(db=self, subkey='connections.', klas=ConnectionRecord)

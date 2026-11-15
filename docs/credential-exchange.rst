@@ -17,8 +17,8 @@ Use a distinct storage base when running separate instances; changing
 Add a contact through its OOBI or signed introduction file. Locksmith verifies
 and saves the delivery address. Local aliases are labels, not trust anchors.
 Use **Identifiers → View → Copy contact link** or **Share introduction** to
-share your own identifier. Sharing and credential actions finish receiving
-setup through your configured account provider when needed.
+share your own identifier. You can share the introduction file before account or mailbox
+setup. The contact link and credential actions require a receiving address.
 
 Messaging starts automatically for local individual identifiers when the KERI
 Foundation account offers mailboxes. No separate mailbox registration is needed.
@@ -31,24 +31,31 @@ Open **Connection details → Retry connection** to resume receiving. Use
 credential or its approved disclosure. Invalid authorization and expired
 exchanges require correction instead of automatic retries.
 
-Connection details also contains technical addresses and an export of the
-available introduction. For an old contact without a delivery address, refresh
+Connection details also shows technical addresses. For an old contact without a delivery address, refresh
 the contact or import its updated introduction. Witness routes alone do not
 provide credential delivery.
 
 Issue and send
 --------------
 
-1. Load the intended schema in the issuer and recipient wallets. In the issuer,
-   enable credential issuance for that schema and select the local issuer AID.
-2. Open Issued Credentials and choose Issue Credential. Select the schema,
+1. Load the schema in the issuer wallet, enable issuance, and select the local
+   issuer AID. The recipient wallet loads matching built-in schemas when it
+   verifies a Grant. Import any other required schemas in the recipient wallet.
+2. Open Issued Credentials and choose Issue Credential. Select the credential type,
    recipient, attributes, linked credentials and terms. Use the authentication
    supported by that schema and the relying application: registry, issuer KEL
    anchor, or issuer signature. Registry-backed credentials require configured
    registry services and accepted evidence.
 3. Review the entered information and choose Issue Credential. Complete any
    witness authentication requested by the identifier. Wait for Credential
-   created before continuing.
+   created before continuing. If the witness code expires, enter a current code
+   and retry. Locksmith can collect missing receipts for this issuance on retry.
+   If earlier events belong to other operations, review what each event seals.
+   Choose **Approve recovery** to collect their receipts with the witness code,
+   or choose **Back** to leave them pending. To continue after a
+   vault restart, open **Issued Credentials → Resume issuance** on the pending
+   credential. You can also reopen its original request. Review the saved values
+   and authenticate again.
 4. Choose Grant, or use the credential's Grant action later. Verify the recipient
    and expand Review data and terms to share. Send only the intended disclosure.
 5. In the recipient wallet, open Activity, review the received exchange and choose
@@ -94,9 +101,17 @@ for its file or URL. The imported schema must match the request. Setup does not
 create or send a credential; review the credential fields before issuing it.
 Start an Offer from an issued or
 received credential. Open the exchange in Activity for the next available
-response. Requested fields are not selected automatically: the holder reviews
-and chooses what to offer. Fields in one indivisible block are shared together.
+response. On a presentation request, **Select all requested** selects the
+requested fields on that credential. To add another field, open **Additional
+fields (not requested)** and select it individually. Fields in one indivisible
+block are shared together.
 Required identity, credential links and terms remain visible.
+
+Activity moves expired exchanges to **History** on refresh. An interrupted
+acceptance stays in **In progress** so you can resume it. To clear another
+exchange, open its row menu and choose **Move to history**.
+Use **Return to in progress** to restore it. This choice applies to your wallet.
+Delivery continues, and a new reply that needs action appears in **In progress**.
 
 For schemas that declare both an issuance registry and an issuee presentation
 registry (``rd`` and ``a.i``/``a.rd``), **Request credential…** names the controlling

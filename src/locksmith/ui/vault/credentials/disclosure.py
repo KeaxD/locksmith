@@ -2,7 +2,7 @@
 from collections.abc import Mapping
 import json
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from locksmith.core import credentialing, ipexing
@@ -10,8 +10,62 @@ from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets.buttons import LocksmithButton, LocksmithCheckbox
 from locksmith.ui.vault.credentials.presentation import (
     attribute_view, credential_name, identifier_name, rules_text, disclosure_fields, disclosure_paths,
-    attribute_label, consent_action, details_section, display_claims,
+    attribute_label, consent_action, details_section, display_claims, requested_field_paths,
 )
+
+
+class OfferRegistryWait(QObject):
+    """Resume one approved Offer after its pending registry check completes."""
+
+    def __init__(self, dialog, form, send, failed, *, decline=None):
+        super().__init__(dialog)
+        self.dialog, self.form, self.send, self.failed, self.decline = dialog, form, send, failed, decline
+        self.pending = None
+        self._completed = None
+        self._label = ''
+        dialog.finished.connect(self.cancel)
+
+    def wait(self, check):
+        if self._completed == (check.registry, check.operation):
+            # That check just completed and its evidence is still not current. Let the user decide when to retry.
+            self.failed(str(check))
+            self.dialog.send_button.setEnabled(True)
+            return
+        # A different check, such as the registrar after the observer, waits in turn.
+        self.pending = (check.registry, check.operation)
+        self._label = self.dialog.send_button.text()
+        self.form.setEnabled(False)
+        if self.decline is not None:
+            self.decline.setEnabled(False)
+        self.dialog.send_button.setEnabled(False)
+        self.dialog.send_button.setText('Checking observer…' if check.operation == 'fetch' else 'Waiting for registrar…')
+        self.dialog.vault.signals.doer_event.connect(self.checked, Qt.ConnectionType.QueuedConnection)
+
+    def cancel(self):
+        if self.pending is not None:
+            self.pending = None
+            self.dialog.vault.signals.doer_event.disconnect(self.checked)
+
+    @Slot(str, str, dict)
+    def checked(self, name, event, data):
+        if (name != 'RegistryEvidence' or event != 'status_checked'
+                or self.pending != (data.get('registry'), data.get('operation'))):
+            return
+        completed = self.pending
+        self.cancel()
+        self.form.setEnabled(True)
+        if self.decline is not None:
+            self.decline.setEnabled(True)
+        self.dialog.send_button.setText(self._label)
+        self.dialog.send_button.setEnabled(True)
+        if not data['success']:
+            self.failed(data['error'])
+            return
+        self._completed = completed
+        try:
+            self.send()
+        finally:
+            self._completed = None
 
 
 class DisclosureFields(QWidget):
@@ -19,22 +73,22 @@ class DisclosureFields(QWidget):
 
     changed = Signal()
 
-    def __init__(self, vault, schema, sad=None, selected=None, parent=None, *, requested=(), expand_additional=False):
+    def __init__(self, schema, sad=None, selected=None, parent=None, *, requested=None,
+                 expand_additional=False, select_available=False):
         super().__init__(parent)
         self.checkboxes = {}
+        self.select_all = None
         self.request_notice = None
         self.descriptions = disclosure_fields(schema, sad)
         selected = set(selected or ())
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        requested_names = {field['name'] for field in disclosure_fields(schema)
-                           if field['path'] in requested}
+        requested_paths = requested_field_paths(self.descriptions, requested or (), sad)
         groups = {name: QVBoxLayout() for name in ('Requested fields', 'Additional fields', 'Always shared')}
         for field in self.descriptions:
             required = field['required']
-            wanted = ('' in requested or field['name'] in requested_names
-                      or any(path.startswith(field['path']) for path in requested))
+            wanted = field['path'] in requested_paths
             content = QVBoxLayout()
             content.setContentsMargins(0, 0, 0, 0)
             content.setSpacing(4)
@@ -42,11 +96,12 @@ class DisclosureFields(QWidget):
             definition = definition if isinstance(definition, Mapping) else {}
             properties = (field['value'] if isinstance(field['value'], Mapping)
                           else definition.get('properties', {}))
+            claims = display_claims(field['value'], field['schema']) if sad is not None else None
             if required:
                 if sad is not None:
                     # Mapping children already carry their schema labels.
                     label = None if isinstance(field['value'], Mapping) and field['value'] else field['name']
-                    group = attribute_view(label, display_claims(field['value'], field['schema']), field['schema'])
+                    group = attribute_view(label, claims, field['schema'])
                 else:
                     group = self._explanation(field['name'])
                 group.setAccessibleName('Required information: ' + field['name'])
@@ -57,13 +112,13 @@ class DisclosureFields(QWidget):
                 checkbox.setAccessibleDescription(
                     'Request this field. The holder decides whether to offer it.' if sad is None else
                     ('Requested; ' if wanted else 'Optional; ') + 'not shared unless selected. ' +
-                    str(display_claims(field['value'], field['schema'])))
+                    str(claims))
                 checkbox.setChecked(field['path'] in selected)
                 self.checkboxes[field['path']] = checkbox
                 checkbox.toggled.connect(self._selection_changed)
                 content.addWidget(checkbox)
                 if sad is not None:
-                    content.addWidget(attribute_view(None, display_claims(field['value'], field['schema']), field['schema']))
+                    content.addWidget(attribute_view(None, claims, field['schema']))
             if len(properties.keys() - {'d', 'u'}) > 1:
                 content.addWidget(self._explanation(
                     'Shared together; individual values cannot be omitted.'))
@@ -77,12 +132,24 @@ class DisclosureFields(QWidget):
                     continue
                 widget = QWidget()
                 widget.setLayout(group)
+                if name == 'Requested fields' or (select_available and name == 'Additional fields'):
+                    self.select_all = LocksmithButton('Select all' if select_available else 'Select all requested')
+                    self.select_all.setToolTip(
+                        'Use this when issuing a credential with all its available fields. '
+                        'Choose fields from linked credentials separately.' if select_available else
+                        'Select the requested fields shown for this credential.')
+                    consent_action(self.select_all)
+                    group.insertWidget(0, self.select_all)
+                    choices = widget.findChildren(LocksmithCheckbox)
+                    self.select_all.clicked.connect(lambda checked=False, boxes=choices: self._select_fields(boxes))
                 if name == 'Requested fields':
                     layout.addWidget(self._explanation(name + ' · choose what to offer'))
                     layout.addWidget(widget)
                 else:
-                    layout.addWidget(details_section(name, widget,
-                        expanded=name == 'Additional fields' and expand_additional))
+                    additional = name == 'Additional fields'
+                    title = 'Additional fields (not requested)' if additional and requested is not None else name
+                    layout.addWidget(details_section(title, widget, expanded=additional and
+                        (expand_additional or bool(selected - requested_paths))))
         if sad is None and self.checkboxes:
             self.request_notice = self._explanation('No specific fields requested; the holder chooses what to offer.')
             self.request_notice.setVisible(not self.has_selection())
@@ -108,13 +175,18 @@ class DisclosureFields(QWidget):
     def has_selection(self):
         return any(checkbox.isChecked() for checkbox in self.checkboxes.values())
 
+    @staticmethod
+    def _select_fields(checkboxes):
+        for checkbox in checkboxes:
+            checkbox.setChecked(True)
+
 
 class DisclosureSelection(QWidget):
     """Review and select data from retained credential evidence before an Offer."""
 
     changed = Signal()
 
-    def __init__(self, vault, credential_said, selections=None, parent=None, *, requested=None):
+    def __init__(self, vault, credential_said, selections=None, parent=None, *, requested=None, issuer_delivery=False):
         super().__init__(parent)
         self.vault, self.credential_said = vault, credential_said
         self.selections = selections if selections is not None else {}
@@ -133,8 +205,11 @@ class DisclosureSelection(QWidget):
         overview.setContentsMargins(0, 0, 0, 0)
         overview.addWidget(self.summary)
         layout.addWidget(self.overview)
-        requested = {prefix: paths for graph in requested or [] for _, prefix, paths in graph}
-        specific_request = any(requested.values())
+        graph = requested[0] if requested and len(requested) == 1 else []
+        requests = {}
+        if graph and graph[0][:2] == plan[0][0][:2]:
+            requests = {(schema, prefix): paths for schema, prefix, paths in graph}
+        specific_request = any(requests.values())
         opened_additional = False
         self.required_summary = QLabel()
         self.required_summary.setTextFormat(Qt.TextFormat.PlainText)
@@ -157,20 +232,15 @@ class DisclosureSelection(QWidget):
             card_layout.setContentsMargins(0, 0, 0, 0)
             card_layout.addWidget(attribute_view(credential_name(schema),
                 'Issued by ' + identifier_name(vault, node['i'])))
-            fields = DisclosureFields(vault, schema, node, self.selections.get(prefix),
-                                      requested=requested.get(prefix, []),
-                                      expand_additional=not specific_request and not opened_additional)
+            select_available = prefix == '/' and (requested is None or
+                (issuer_delivery and requested == [[[schema_said, '/', []]]]))
+            fields = DisclosureFields(schema, node, self.selections.get(prefix),
+                                      requested=requests.get((schema_said, prefix), ()) if requested is not None else None,
+                                      expand_additional=not specific_request and not opened_additional,
+                                      select_available=select_available)
             opened_additional = opened_additional or bool(fields.checkboxes)
             self.field_widgets[prefix] = fields
             fields.changed.connect(self._changed)
-            if prefix == '/' and fields.checkboxes:
-                self.select_all_issuance = LocksmithButton('Select all for credential issuance')
-                consent_action(self.select_all_issuance)
-                self.select_all_issuance.clicked.connect(self._select_issuance_fields)
-                card_layout.addWidget(self.select_all_issuance)
-                card_layout.addWidget(DisclosureFields._explanation(
-                    f'Selects all available {credential_name(schema)} fields. '
-                    'Linked credential field selections stay unchanged.'))
             card_layout.addWidget(fields)
             required = [field for field in fields.descriptions if field['required']]
             if required:
@@ -202,10 +272,6 @@ class DisclosureSelection(QWidget):
         if isinstance(value, list):
             return ', '.join(DisclosureSelection._compact(item, schema.get('items', {})) for item in value) or '[]'
         return ('Yes' if value else 'No') if isinstance(value, bool) else '—' if value is None else str(value)
-
-    def _select_issuance_fields(self):
-        for checkbox in self.field_widgets['/'].checkboxes.values():
-            checkbox.setChecked(True)
 
     def _changed(self):
         selections = self.selected_fields()

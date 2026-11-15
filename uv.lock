@@ -370,7 +370,7 @@ wheels = [
 
 [[package]]
 name = "hio"
-version = "0.7.20"
+version = "0.7.21"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "blake3" },
@@ -383,7 +383,7 @@ dependencies = [
     { name = "pysodium" },
     { name = "sortedcontainers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/71/1abecf7fcc42bf84c81b35ca9cfcee84f63b81b72bd0115577ebc18d31cb/hio-0.7.20.tar.gz", hash = "sha256:f88bd74fa5d680697f24b565cdfbc543224607222720687e2fc0d2cd67ccd70f", size = 210443, upload-time = "2026-09-10T20:35:30.718Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9b/5e/c77cd9cba6565eb6ef7baa8b803fa051cf3860424fae93c5d9f83702f88d/hio-0.7.21.tar.gz", hash = "sha256:6fae5f5d162a92f4f0dc7071759fe0c077bd5a6978ed8a59f96b18f56543a62a", size = 210455, upload-time = "2026-11-11T18:04:44.363Z" }
 
 [[package]]
 name = "hjson"
@@ -475,7 +475,7 @@ wheels = [
 [[package]]
 name = "keri"
 version = "2.1.0.dev1"
-source = { git = "https://github.com/WebOfTrust/keripy.git?rev=61fc9436e55e8c39d6e4f4cdd4e9a880d45b6b85#61fc9436e55e8c39d6e4f4cdd4e9a880d45b6b85" }
+source = { git = "https://github.com/WebOfTrust/keripy.git?rev=06196826d0aa42051dec042d7400c34a43fffa13#06196826d0aa42051dec042d7400c34a43fffa13" }
 dependencies = [
     { name = "apispec" },
     { name = "blake3" },
@@ -577,7 +577,7 @@ requires-dist = [
     { name = "cbor", specifier = ">=1.0.0" },
     { name = "cryptography", specifier = ">=46.0.3" },
     { name = "falcon", specifier = ">=4.2.0" },
-    { name = "keri", git = "https://github.com/WebOfTrust/keripy.git?rev=61fc9436e55e8c39d6e4f4cdd4e9a880d45b6b85" },
+    { name = "keri", git = "https://github.com/WebOfTrust/keripy.git?rev=06196826d0aa42051dec042d7400c34a43fffa13" },
     { name = "kerkle", specifier = ">=0.0.3" },
     { name = "mnemonic", specifier = "==0.21" },
     { name = "multicommand", specifier = "==1.0.0" },

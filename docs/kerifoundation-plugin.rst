@@ -85,7 +85,8 @@ rejected setup waits for **Connection details → Retry connection**. A failed
 replacement leaves the previous authorization in place.
 
 **Copy contact link** shares the mailbox-hosted introduction. **Share introduction**
-exports the signed public history, service location, and mailbox authorization.
+exports the signed public history. It includes the service location and mailbox
+authorization when available.
 Neither operation exports private keys or grants another user mailbox read access.
 
 Credential messages use this explicit mailbox route. Witnesses continue to

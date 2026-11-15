@@ -72,7 +72,7 @@ class ComposePresentationDialog(LocksmithDialog):
         for name, definition in self._edge_schema['properties'].items():
             if name in ('d', 'u'):
                 continue
-            label = attribute_label(name, definition).removesuffix(' Edge Block')
+            label = attribute_label(name, definition)
             field = FloatingLabelComboBox(label)
             field.addItem('Choose a credential' if name in self._edge_schema.get('required', [])
                           else 'Not included', None)

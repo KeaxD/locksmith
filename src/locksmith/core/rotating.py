@@ -7,7 +7,7 @@ Functions for working with KERI Identifiers
 from hio.base import doing
 from keri import help
 from keri import kering
-from keri.core import coring, serdering
+from keri.core import coring
 from keri.help import helping
 
 from locksmith.db.basing import IdentifierMetaInfo
@@ -289,34 +289,10 @@ class AuthenticateWitnessesDoer(CredentialUpdateDoer):
                 sender = self.proxy if self.proxy is not None else self.hab
                 yield from self.postman.sendEventToDelegator(hab=self.hab, sender=sender, fn=self.hab.kever.sn)
             else:
-                for sn in range(self.hab.kever.sn + 1):
-                    self._check_current()
-                    yield self.tock
-                    self._check_current()
-                    event = serdering.SerderKERI(raw=self.hab.msgOwnEvent(sn=sn))
-                    threshold = self.hab.kvy.fetchEstEvent(self.hab.pre, sn).bner.num
-                    if len(self.hab.db.wigs.get((self.hab.pre, event.said))) >= threshold:
-                        continue
-                    if receiptor is None:
-                        receiptor = LocksmithReceiptor(hby=self.hby)
-                        self.extend([receiptor])
-                    # A witness may already have advanced beyond this saved event.
-                    fetch = receiptor.get(self.hab.pre, sn=sn)
-                    deadline = self.tyme + 15.0
-                    try:
-                        for _ in fetch:
-                            self._check_current()
-                            if self.tyme >= deadline:
-                                raise TimeoutError(f'Receipt lookup timed out for event {sn}')
-                            yield self.tock
-                    finally:
-                        fetch.close()
-                    if len(self.hab.db.wigs.get((self.hab.pre, event.said))) >= threshold:
-                        continue
-                    witnesses = [wit.qb64 for wit in self.hab.kvy.fetchWitnessState(self.hab.pre, sn)]
-                    if witnesses != self.hab.kever.wits or threshold != self.hab.kever.toader.num:
-                        raise kering.ValidationError(f'Event {sn} needs its original witness configuration')
-                    yield from self.receipt(self.hab, event, receiptor, auths)
+                receiptor = LocksmithReceiptor(hby=self.hby)
+                self.extend([receiptor])
+                missing = yield from self.missing_receipts(self.hab, self.tip)
+                yield from self.recover_receipts(self.hab, receiptor, auths, tip=self.tip, missing=missing)
             self._check_current()
             if self.app.plugin_manager:
                 for witness in self.hab.kever.wits:

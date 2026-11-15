@@ -1008,53 +1008,132 @@ def test_issuance_rejects_schema_mismatch(ipex_vaults):
     assert hab.kever.sn == 0
 
 
-@pytest.mark.parametrize(('authentication', 'ends_early'), [('registry', False), ('anchor', True)])
-def test_witness_timeout_preserves_pending_issuance_and_closes_receiptor(
-        ipex_vaults, monkeypatch, authentication, ends_early):
+@pytest.mark.parametrize(('authentication', 'failed_sn'), [('registry', 1), ('registry', 2), ('anchor', 1)])
+def test_issuance_recovers_receipts_and_reuses_credential_after_reopen(
+        ipex_vaults, monkeypatch, authentication, failed_sn):
     app = ipex_vaults('issuance-timeout')
     witness = app.hby.makeHab(name='witness', transferable=False)
-    hab = app.hby.makeHab(name='issuer', wits=[witness.pre], toad=1)
+    hab = app.hby.makeHab(name='issuer')
+    hab.rotate(adds=[witness.pre], toad=1)
+    _deliver_ipex(app.vault, witness.witness(hab.kever.serder))
+    # Earlier attempts by a previous wallet version left four unreceipted events.
+    for _ in range(4):
+        hab.interact()
     schema = _load_schema(app, hab)
-    receipts = []
+    base = hab.kever.sn
+    attempts = []
+    lookups = []
+    accepted = 1
+    failure = base + failed_sn
+
+    def get(self, pre, sn=None):
+        lookups.append(sn)
+        yield self.tock
+        if sn <= accepted:
+            _deliver_ipex(app.vault, witness.witness(hab.getOwnEvent(sn)[0]))
+
     def receipt(self, pre, sn=None, auths=None):
-        receipts.append(sn)
-        if sn == 1 and authentication == 'registry':
-            _deliver_ipex(app.vault, witness.witness(SerderKERI(raw=hab.msgOwnEvent(sn=sn))))
+        nonlocal accepted
+        attempts.append(sn)
+        assert sn == accepted + 1
+        assert auths[witness.pre].startswith('123456#')
+        if sn == failure:
+            if failed_sn == 2:
+                while True:
+                    yield self.tock
             return
-        try:
-            if ends_early:
-                return
-            while True:
-                yield self.tock
-        finally:
-            receipts.append('closed')
+        _deliver_ipex(app.vault, witness.witness(hab.getOwnEvent(sn)[0]))
+        accepted = sn
+
+    monkeypatch.setattr(credentialing.LocksmithReceiptor, 'get', get)
+    monkeypatch.setattr(credentialing.LocksmithReceiptor, 'receipt', receipt)
+    def issue(approval=None):
+        events = []
+        callback = lambda name, event, data: events.append((event, data))
+        app.vault.signals.doer_event.connect(callback)
+        doer = credentialing.IssueCredentialDoer(app, schema.said, hab.pre, {'LEI': 'test'},
+                                                authentication=authentication, codes=[f'{witness.pre}:123456'],
+                                                approval=approval)
+        doing.Doist(doers=[doer], tock=0.03125, limit=32).do()
+        app.vault.signals.doer_event.disconnect(callback)
+        assert doer.done and not doer.deeds
+        return events[-1]
+
+    event, data = issue()
+    assert event == 'receipt_review'
+    review = data['review']
+    assert [said for said, _, _ in review.events] == [hab.getOwnEvent(sn)[0].said for sn in range(2, 6)]
+    partial = credentialing.ReceiptReview(hab.pre, review.tip, review.events[:-1])
+    assert issue(partial)[0] == 'receipt_review'
+    assert not attempts and not lookups and hab.kever.sn == base
+    assert not list(app.vault.db.pending_issuances.getTopItemIter())
+    assert issue(review)[0] == 'credential_issuance_failed'
+    assert attempts == list(range(2, failure + 1))
+    key, pending = next(app.vault.db.pending_issuances.getTopItemIter())
+    said = credentialing.SerderACDC(raw=pending.raw.encode()).said
+    registries = set(app.rgy.regs)
+    if authentication == 'anchor' or failed_sn == 2:
+        assert credentialing.credential(app.vault, said)['status']['et'] == 'pending'
+        with pytest.raises(kering.ValidationError, match='verified issued state'):
+            ipexing.grant(app.vault, hab, said, hab.pre)
+    app.close_vault()
+    app = ipex_vaults('issuance-timeout')
+    hab, witness = app.hby.habByName('issuer'), app.hby.habByName('witness')
+    assert issue()[0] == 'credential_issuance_failed'
+    assert hab.kever.sn == failure and attempts[-1] == failure
+    if authentication == 'registry' and failed_sn == 1:
+        # An older pending record or a crash before saving its KEL digest needs review.
+        pending = app.vault.db.pending_issuances.get(key)
+        assert pending.anchors == [hab.kever.serder.said]
+        pending.anchors.clear()
+        app.vault.db.pending_issuances.pin(key, pending)
+        before = len(attempts), len(lookups)
+        event, data = issue()
+        assert event == 'receipt_review' and data['review'].events[0][0] == hab.kever.serder.said
+        assert (len(attempts), len(lookups)) == before
+        approval = data['review']
+    else:
+        approval = None
+    failure = None
+    event, data = issue(approval)
+    assert event == 'credential_issued' and data['credential_said'] == said
+    assert set(app.rgy.regs) == registries
+    assert list(app.vault.db.pending_issuances.getTopItemIter()) == []
+    assert len(list(app.vault.db.issued.getTopItemIter())) == 1
+    assert hab.kever.sn == base + (2 if authentication == 'registry' else 1)
+    assert credentialing.credential(app.vault, said)['status']['et'] == (
+        'issued' if authentication == 'registry' else 'authenticated')
+
+
+def test_retry_requires_review_for_a_second_event_sealing_the_same_credential(ipex_vaults, monkeypatch):
+    app = ipex_vaults('issuance-duplicate-seal')
+    witness = app.hby.makeHab(name='witness', transferable=False)
+    hab = app.hby.makeHab(name='issuer', wits=[witness.pre], toad=1)
+    _deliver_ipex(app.vault, witness.witness(hab.kever.serder))
+    schema = _load_schema(app, hab)
+    posts = []
+
+    def receipt(self, pre, sn=None, auths=None):
+        posts.append(sn)
+        yield self.tock
+
     monkeypatch.setattr(credentialing.LocksmithReceiptor, 'receipt', receipt)
     events = []
     app.vault.signals.doer_event.connect(lambda name, event, data: events.append((event, data)))
-    doer = credentialing.IssueCredentialDoer(app, schema.said, hab.pre, {'LEI': 'test'},
-                                            authentication=authentication)
-    doing.Doist(doers=[doer], tock=0.03125, limit=31.0).do()
-    assert doer.done
-    assert not doer.deeds
-    assert receipts == ([1, 2, 'closed'] if authentication == 'registry' else [1, 'closed']), (receipts, events)
-    assert events[-1][0] == 'credential_issuance_failed'
-    ((said,), _), = app.vault.db.issued.getTopItemIter()
-    app.vault.rgy.processEscrows()
-    assert credentialing.credential(app.vault, said)['status']['et'] == 'pending'
-    with pytest.raises(kering.ValidationError, match='verified issued state'):
-        ipexing.grant(app.vault, hab, said, hab.pre)
-    app.close_vault()
-    reopened = ipex_vaults('issuance-timeout')
-    assert len(list(reopened.vault.db.issued.getTopItemIter())) == 1
-    reopened.vault.rgy.processEscrows()
-    assert credentialing.credential(reopened.vault, said)['status']['et'] == 'pending'
-    hab = reopened.hby.habByName('issuer')
-    witness = reopened.hby.habByName('witness')
-    sn = 2 if authentication == 'registry' else 1
-    _deliver_ipex(reopened.vault, witness.witness(SerderKERI(raw=hab.msgOwnEvent(sn=sn))))
-    reopened.vault.rgy.processEscrows()
-    assert credentialing.credential(reopened.vault, said)['status']['et'] == (
-        'issued' if authentication == 'registry' else 'authenticated')
+
+    def issue():
+        worker = credentialing.IssueCredentialDoer(app, schema.said, hab.pre, {'LEI': 'test'}, authentication='anchor')
+        doing.Doist(doers=[worker], tock=0.03125, limit=1).do()
+
+    issue()
+    assert events[-1][0] == 'credential_issuance_failed' and posts == [1]
+    # A second operation repeats the same seal. Its distinct signed event still needs consent.
+    hab.interact(data=hab.kever.serder.seals)
+    issue()
+    event, data = events[-1]
+    assert event == 'receipt_review'
+    assert [said for said, _, _ in data['review'].events] == [hab.kever.serder.said]
+    assert posts == [1] and hab.kever.sn == 2
 
 
 @pytest.mark.parametrize('kind', [kering.Kinds.json, kering.Kinds.cbor, kering.Kinds.mgpk])

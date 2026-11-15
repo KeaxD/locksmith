@@ -611,7 +611,7 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
                          version=kering.Vrsn_2_0)
         cut = source.db.eans.get(keys=keys)
         assert source.db.ends.get(keys=keys).allowed is False
-        export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner', require_messaging=False)
+        export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is False
 

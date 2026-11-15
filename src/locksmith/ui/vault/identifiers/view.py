@@ -93,10 +93,6 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
         self.retry_connection = LocksmithInvertedButton('Retry connection')
         self.retry_connection.clicked.connect(self._retry_connection)
         connection_layout.addWidget(self.retry_connection)
-        self.export_available = LocksmithInvertedButton('Export available introduction')
-        self.export_available.clicked.connect(lambda: export_identifier_to_cesr(
-            self, self.app, self.identifier_alias, require_messaging=False))
-        connection_layout.addWidget(self.export_available)
         self._build_oobi_section(connection_layout)
         self.connection_section.set_content_layout(connection_layout)
         layout.addWidget(self.connection_section)

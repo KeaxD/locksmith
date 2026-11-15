@@ -7,9 +7,8 @@ from locksmith.ui.vault.shared.messaging import prepare_messaging
 from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import LocksmithButton, LocksmithDialog, LocksmithInvertedButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
-from locksmith.ui.vault.credentials.disclosure import DisclosureFields, DisclosureSelection
-from locksmith.ui.vault.credentials.presentation import credential_name, identifier_name, disclosure_fields
-from locksmith.ui.vault.credentials.schema.catalog import request_schemas
+from locksmith.ui.vault.credentials.disclosure import DisclosureFields, DisclosureSelection, OfferRegistryWait
+from locksmith.ui.vault.credentials.presentation import attribute_label, credential_name, identifier_name
 from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
 from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
 
@@ -19,9 +18,9 @@ class RequestDisclosure(QWidget):
 
     changed = Signal()
 
-    def __init__(self, vault, schema, schemas, parent=None):
+    def __init__(self, schema, schemas, parent=None):
         super().__init__(parent)
-        self.vault, self.schema, self.schemas = vault, schema, schemas
+        self.schemas = schemas
         self.links = {}
         edges = credentialing.schema_detail(schema.get('properties', {}).get('e')) or {}
         self.slots = {name: detail for name, definition in edges.get('properties', {}).items()
@@ -30,7 +29,7 @@ class RequestDisclosure(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        self.fields = DisclosureFields(vault, schema)
+        self.fields = DisclosureFields(schema)
         self.fields.changed.connect(self.changed)
         layout.addWidget(self.fields)
         self.link_rows = QVBoxLayout()
@@ -46,7 +45,7 @@ class RequestDisclosure(QWidget):
             self.add_information.addItem('Choose information', None)
             for name, definition in self.slots.items():
                 if name not in self.links:
-                    label = definition.get('description', name).removesuffix(' Edge Block')
+                    label = attribute_label(name, definition)
                     self.add_information.addItem(label, name)
         self.add_information.setVisible(len(self.links) < len(self.slots))
 
@@ -59,7 +58,7 @@ class RequestDisclosure(QWidget):
         layout = QVBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         heading = QHBoxLayout()
-        selector = FloatingLabelComboBox(definition.get('description', name).removesuffix(' Edge Block'))
+        selector = FloatingLabelComboBox(attribute_label(name, definition))
         selector.addItem('Choose credential type', None)
         fixed = definition.get('properties', {}).get('s', {}).get('const')
         for said, schemer in self.schemas.items():
@@ -87,7 +86,7 @@ class RequestDisclosure(QWidget):
             fields.hide()
         if said:
             if said not in link['fields']:
-                fields = DisclosureFields(self.vault, self.schemas[said].sed)
+                fields = DisclosureFields(self.schemas[said].sed)
                 fields.changed.connect(self.changed)
                 link['fields'][said] = fields
                 link['row'].layout().addWidget(fields)
@@ -102,14 +101,14 @@ class RequestDisclosure(QWidget):
         self.changed.emit()
 
     @staticmethod
-    def _requested_fields(widget, schema):
+    def _requested_fields(widget):
         selected = widget.selected_fields()
         if selected:
-            selected.extend(field['path'] for field in disclosure_fields(schema) if field['required'])
+            selected.extend(field['path'] for field in widget.descriptions if field['required'])
         return selected
 
     def disclosure_plan(self, said):
-        graph = [[said, '/', self._requested_fields(self.fields, self.schema)]]
+        graph = [[said, '/', self._requested_fields(self.fields)]]
         for name in self.slots:
             if name not in self.links:
                 continue
@@ -119,8 +118,7 @@ class RequestDisclosure(QWidget):
                 if link['fixed'] and link['fixed'] not in self.schemas:
                     raise ValueError('Load the linked credential schema before requesting this information.')
                 raise ValueError('Choose a credential type for the linked information.')
-            graph.append([source, f'/e/{name}/_/',
-                          self._requested_fields(link['fields'][source], self.schemas[source].sed)])
+            graph.append([source, f'/e/{name}/_/', self._requested_fields(link['fields'][source])])
         return [graph]
 
 
@@ -171,7 +169,7 @@ class StartExchangeDialog(LocksmithDialog):
         layout.addWidget(self.recipient)
         self.selection = FloatingLabelComboBox('Credential type' if action == 'Apply' else 'Credential')
         if action == 'Apply':
-            self.schemas = request_schemas(self.vault)
+            self.schemas = credentialing.request_schemas(self.vault)
             self.selection.addItem('Choose credential type', None)
             for said, schemer in self.schemas.items():
                 self.selection.addItem(credential_name(schemer.sed), said)
@@ -226,7 +224,9 @@ class StartExchangeDialog(LocksmithDialog):
             title = 'Request credential' if intent == 'issuance' else 'Request presentation'
         super().__init__(parent, title=title,
                          content=content, buttons=buttons, show_title_divider=False)
+        self.error_label.setTextFormat(Qt.TextFormat.PlainText)
         self.fit_content(640 if action == 'Apply' and intent == 'issuance' else 540)
+        self.offer_wait = OfferRegistryWait(self, content, self._send, self._messaging_error)
         cancel.clicked.connect(self.close)
         self.send_button.clicked.connect(self._send)
         self.sender.currentIndexChanged.connect(self._update_recipients)
@@ -274,7 +274,7 @@ class StartExchangeDialog(LocksmithDialog):
             try:
                 if said:
                     if said not in self._requests:
-                        request = RequestDisclosure(self.vault, self.schemas[said].sed, self.schemas)
+                        request = RequestDisclosure(self.schemas[said].sed, self.schemas)
                         request.changed.connect(self._request_changed)
                         self._requests[said] = request
                         self.preview.layout().addWidget(request)
@@ -315,6 +315,9 @@ class StartExchangeDialog(LocksmithDialog):
         if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
             self.send_button.setEnabled(False)
             return
+        if self._request_doer is None and self.error_label.text():
+            self.clear_error(resize_dialog=False)
+            self.error_label.clear()
         hab = self.vault.hby.habByPre(self.sender.currentData())
         needs_registry = self._needs_registry()
         if needs_registry:
@@ -426,25 +429,25 @@ class StartExchangeDialog(LocksmithDialog):
             self.fit_content(self.width())
         elif event == 'failed':
             authenticated = self._request_authenticated()
-            self.progress.setText(
-                'Registry created. Your credential request has not been sent. Retry to finish setup and send it.'
-                if authenticated else 'Registry setup is incomplete. Your credential request has not been sent.')
-            self.progress.show()
+            self.progress.hide()
             if self._auth_panel:
                 self._auth_panel.setEnabled(True)
                 self._auth_panel.setVisible(not authenticated)
                 self.auth_notice.setVisible(not authenticated)
-            self.error.setText(data['error'])
-            self.error.show()
             self.send_button.setText('Retry request')
             self.send_button.setEnabled(True)
             self.fit_content(self.width())
+            status = 'Registry created. ' if authenticated else ''
+            self.show_error(f"{status}Your request has not been sent. {data['error']}")
 
     def _send(self):
+        if self.offer_wait.pending is not None:
+            return
         if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
             self.error.setText('This vault is closed.')
             self.error.show()
             return
+        self.clear_error(resize_dialog=False)
         self.send_button.setEnabled(False)
         try:
             hab = self.vault.hby.habByPre(self.sender.currentData())
@@ -492,10 +495,12 @@ class StartExchangeDialog(LocksmithDialog):
             self.accept()
             self.submitted.emit(said)
         except Exception as error:
-            self.error.setText(str(error))
-            self.error.show()
+            if self.action == 'Offer' and isinstance(error, credentialing.RegistryCheckPending):
+                self.error.hide()
+                self.offer_wait.wait(error)
+                return
             self.send_button.setEnabled(True)
-            self.fit_content(self.width())
+            self.show_error(str(error))
 
     def _messaging_error(self, message):
         self.error.setText(message)

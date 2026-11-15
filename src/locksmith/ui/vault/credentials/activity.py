@@ -16,7 +16,6 @@ from keri.peer import exchanging
 from locksmith.core import credentialing, ipexing
 from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.vault.credentials.schema.add import AddSchemaDialog
-from locksmith.ui.vault.credentials.schema.catalog import request_schemas
 from locksmith.ui.vault.shared.messaging import prepare_messaging
 from locksmith.ui import colors
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
@@ -26,13 +25,12 @@ from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
 from locksmith.ui.vault.credentials.received.accept_grant import AcceptGrantDialog
 from locksmith.ui.vault.credentials.issued.issue import IssueCredentialDialog
-from locksmith.ui.vault.credentials.disclosure import DisclosureSelection
-from locksmith.ui.vault.credentials.presentation import identity_context, consent_action, details_section
+from locksmith.ui.vault.credentials.disclosure import DisclosureSelection, OfferRegistryWait
 from locksmith.ui.vault.credentials.compose import ComposePresentationDialog, can_compose
 from locksmith.ui.vault.credentials.issued.view import ViewIssuedCredentialDialog
 from locksmith.ui.vault.credentials.presentation import (
-    attribute_label, attribute_view, credential_name, identifier_name, rules_text,
-    credential_details, offer_details, request_details,
+    attribute_label, attribute_view, consent_action, credential_details, credential_name, details_section,
+    identifier_details, identifier_name, identity_context, offer_summary, request_details, rules_text,
 )
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
@@ -67,8 +65,8 @@ class ActivityTable(PaginatedTableWidget):
         self.table.setColumnWidth(action_column, 260 if any(row['_actions'] for row in data) else 70)
         for index, row in enumerate(data):
             status = self.table.item(index, self.columns.index('Status'))
-            outcome = ('Accepted' if row['Status'] == 'Admit' else 'Declined') if row['_finished'] else row['_outcome']
-            status.setText('Expired\n' + outcome if row.get('expired') else outcome)
+            status.setText({'Admit': 'Accepted', 'Spurn': 'Declined', 'Expired': 'Expired'}[row['Status']]
+                           if row['_finished'] else row['_outcome'])
             status.setToolTip(row['_outcome'])
             if row['_actions']:
                 actions, icons = self.row_actions_callback(row)
@@ -364,7 +362,7 @@ class CredentialActivityPage(BaseListPage):
                 return credential_name(schemer.sed) if schemer else origins[0], nest.serder.sad
         for exn in reversed(chain):
             schema = ipexing.request_schema(exn)
-            schemer = request_schemas(self.vault).get(schema) if schema else None
+            schemer = credentialing.request_schemas(self.vault).get(schema) if schema else None
             if schemer:
                 return credential_name(schemer.sed), None
         return 'Credential request', None
@@ -393,9 +391,17 @@ class CredentialActivityPage(BaseListPage):
                         actions = ['Resume acceptance']
                     submission = exchange['submissions'].get(tip.said) if tip else None
                     blocked = bool(tip and tip.pre == pre and submission and submission.status in ('blocked', 'failed'))
-                    finished = bool(tip and tip.route in ('/ipex/admit', '/ipex/spurn')
-                                    and not interrupted and not exchange['problem']
-                                    and (tip.pre != pre or submission and submission.status == 'submitted'))
+                    expired = bool(exchange.get('expired')) and not interrupted
+                    finished = expired or bool(tip and tip.route in ('/ipex/admit', '/ipex/spurn')
+                                              and not interrupted and not exchange['problem']
+                                              and (tip.pre != pre or submission and submission.status == 'submitted'))
+                    tip_said = tip.said if tip else ''
+                    archive_key = (exchange['root'], str(index))
+                    archive_tip = self.vault.db.archived_exchanges.get(archive_key)
+                    if archive_tip is not None and archive_tip != tip_said:
+                        # A later message ended that choice.
+                        self.vault.db.archived_exchanges.rem(archive_key)
+                    archived = not finished and not interrupted and archive_tip == tip_said
                     origins = {said for exn in chain for said in exn.sad['a'].get('o', [])}
                     # A holder can send a credential from Received inventory.
                     received_first = bool(index) or (credential is not None and credential['i'] != pre)
@@ -410,23 +416,24 @@ class CredentialActivityPage(BaseListPage):
                                From=self._name(exchange['sender']), Status=tip.route.rsplit('/', 1)[-1].title() if tip else 'Unavailable',
                                Updated=updated, Updated_tooltip='Signed date of the latest IPEX stage: ' + stamp,
                                _credential=credential, _key=(exchange['root'], index), _vault=self.vault,
-                               _actions=actions, _attention=bool(actions or blocked or exchange['problem']),
-                               _interrupted=interrupted, _finished=finished, _origins=origins,
+                               _actions=actions, _attention=not (finished or archived) and bool(actions or blocked or exchange['problem']),
+                               _tip=tip_said, _archived=archived, _interrupted=interrupted, _finished=finished, _origins=origins,
                                _inventory_said=inventory_said, _inventory_received=inventory_received,
                                _updated=sort_date)
                     row['_review'] = ('Resume acceptance' if interrupted else
                                       {'Apply': 'Review request', 'Offer': 'Review offer',
                                        'Agree': 'Send credential', 'Grant': 'Review credential'}.get(row['Status'], 'Review'))
                     row['_outcome'] = self._outcome(row)
-                    if exchange.get('expired'):
+                    if expired:
                         row['Status'] = 'Expired'
                     rows[index].append(row)
         self._rows = rows[0] + rows[1]
         for index, table in enumerate(self.tables):
             ordered = sorted(rows[index], key=lambda row: row['_updated'], reverse=True)
             visible = [row for row in ordered if not self._credential_filter or self._credential_filter in row['_origins']]
-            history = [row for row in visible if row['_finished']]
-            active = [row for row in visible if not row['_finished']]
+            active, history = [], []
+            for row in visible:
+                (history if row['_finished'] or row['_archived'] else active).append(row)
             table.set_static_data(active, reset_page=False)
             self.history_tables[index].set_static_data(history, reset_page=False)
             self._update_sections(index)
@@ -441,8 +448,6 @@ class CredentialActivityPage(BaseListPage):
         self._show_details(next((row for row in self._rows if row['_key'] == self._selected), None))
 
     def _outcome(self, row):
-        if row.get('expired'):
-            return 'Start a new request or offer.'
         if not row['messages']:
             return row['problem']
         tip = row['messages'][-1]
@@ -452,6 +457,8 @@ class CredentialActivityPage(BaseListPage):
             if any(receipt.status == 'preparing' for _, receipt in row['receipts']):
                 return 'Waiting for witness receipts before accepting.'
             return 'Acceptance needs to be resumed.'
+        if row.get('expired'):
+            return 'Start a new request or offer.'
         if record and local and record.status != 'submitted':
             label = {'pending': 'Queued', 'sending': 'Sending', 'failed': 'Send failed',
                      'blocked': 'Sending blocked'}.get(record.status, record.status)
@@ -476,6 +483,8 @@ class CredentialActivityPage(BaseListPage):
         actions = [action]
         if row['_inventory_said']:
             actions.append('View credential')
+        if not row['_finished'] and not row['_interrupted']:
+            actions.append('Return to in progress' if row['_archived'] else 'Move to history')
         return actions, {action: ':/assets/material-icons/view.svg',
                          'View credential': ':/assets/material-icons/in-badge.svg'}
 
@@ -587,9 +596,21 @@ class CredentialActivityPage(BaseListPage):
         if row['_vault'] is not self.vault or not self._current_vault():
             return
         self._selected = row['_key']
+        selected_tip = row['_tip']
         self.refresh()
         row = next((item for item in self._rows if item['_key'] == self._selected), None)
         if row is None:
+            return
+        if action in ('Move to history', 'Return to in progress'):
+            if selected_tip != row['_tip'] or action not in self._get_row_actions(row)[0]:
+                return
+            root, direction = self._selected
+            key = (root, str(direction))
+            if action == 'Move to history':
+                self.vault.db.archived_exchanges.pin(key, selected_tip)
+            else:
+                self.vault.db.archived_exchanges.rem(key)
+            self.refresh()
             return
         # Reading clears notifications, not the exchange's outstanding decision.
         saids = {exn.said for exn in row['messages']}
@@ -645,10 +666,10 @@ class ExchangeResponseDialog(LocksmithDialog):
     """Review the current exchange and choose its next response."""
 
     Labels = {'Offer': 'Send offer', 'Grant': 'Send credential',
-              'Agree': 'Request disclosure', 'Spurn': 'Decline'}
+              'Agree': 'Request these fields', 'Spurn': 'Decline'}
     Help = {'Offer': 'Sends a credential reference and the credential types to disclose. Values and terms are sent in the next step.',
             'Grant': 'Sends the credential values now. The recipient can review them before adding the credential.',
-            'Agree': 'Request the offered disclosure for review.',
+            'Agree': 'You can review the values when the sender shares them.',
             'Spurn': 'This ends the exchange.'}
 
     def __init__(self, page, row, action):
@@ -659,20 +680,21 @@ class ExchangeResponseDialog(LocksmithDialog):
         self._composition_draft = {}
         self._disclosure_selection = None
         content = QWidget()
-        layout = QVBoxLayout(content)
+        layout = self.form_layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         tip = row['messages'][-1]
-        summary = QLabel(row['Credential'])
+        summary = QLabel(f'{page._name(tip.pre)} is offering to share with {page._name(tip.sad["ri"])}'
+                         if tip.route == '/ipex/offer'
+                         else row['Credential'])
         summary.setTextFormat(Qt.TextFormat.PlainText)
         summary.setStyleSheet('font-size: 18px; font-weight: 600;')
         summary.setWordWrap(True)
         layout.addWidget(summary)
-        presenter, recipient = ((tip.pre, tip.sad['ri']) if tip.route == '/ipex/offer'
-                                else (tip.sad['ri'], tip.pre))
-        self.identity_context = identity_context(self.vault, presenter, recipient, compact=True)
-        layout.addWidget(self.identity_context)
+        if tip.route != '/ipex/offer':
+            self.identity_context = identity_context(self.vault, tip.sad['ri'], tip.pre, compact=True)
+            layout.addWidget(self.identity_context)
         options = QWidget()
         options_layout = QVBoxLayout(options)
         options_layout.setContentsMargins(0, 0, 0, 0)
@@ -688,11 +710,11 @@ class ExchangeResponseDialog(LocksmithDialog):
         layout.addWidget(self.explanation)
         self.offer_review = QWidget()
         QVBoxLayout(self.offer_review).setContentsMargins(0, 0, 0, 0)
-        options_layout.addWidget(self.offer_review)
         self.anchor_notice = QLabel()
         self.anchor_notice.setWordWrap(True)
         self.anchor_notice.setStyleSheet(f'color: {colors.WARNING_TEXT};')
         layout.addWidget(self.anchor_notice)
+        (layout if tip.route == '/ipex/offer' else options_layout).addWidget(self.offer_review)
         self.credential_field = FloatingLabelComboBox(label_text='Credential to disclose')
         self.credential = self.credential_field.combo_box
         self.credential.setAccessibleName('Credential to disclose')
@@ -733,6 +755,7 @@ class ExchangeResponseDialog(LocksmithDialog):
             row['Status'], 'Credential exchange')
         super().__init__(page, title=title, title_icon=':/assets/material-icons/in-badge.svg',
                          content=content, buttons=buttons, show_overlay=False)
+        self.offer_wait = OfferRegistryWait(self, content, self._send, self.show_error, decline=decline)
         self.title_label.setStyleSheet('font-size: 16px;')
         self.error_label.setTextFormat(Qt.TextFormat.PlainText)
         self.error_animation.finished.connect(self._re_enable_scrollbars)
@@ -794,7 +817,7 @@ class ExchangeResponseDialog(LocksmithDialog):
         self.anchor_notice.setVisible(anchored)
         request = self.vault.hby.db.exns.get((tip.sad['p'],)) if tip.route == '/ipex/agree' else tip
         requested = ipexing.request_schema(request)
-        schemer = request_schemas(self.vault).get(requested) if requested else None
+        schemer = credentialing.request_schemas(self.vault).get(requested) if requested else None
         self._compose = bool(schemer and can_compose(schemer.sed))
         self._can_create = (disclose and tip.route == '/ipex/apply' and requested is not None
                             and tip.sad['ri'] in {item['prefix'] for item in
@@ -906,7 +929,9 @@ class ExchangeResponseDialog(LocksmithDialog):
             self.disclosure_choices.hide()
         self._show_offer()
         compact = self.action == 'Offer' and self._disclosure_selection is not None and not unavailable
-        self.review_options.toggle_button.setChecked(not compact)
+        has_options = tip.route == '/ipex/apply' or not self.credential_field.isHidden()
+        self.review_options.setVisible(has_options)
+        self.review_options.toggle_button.setChecked(has_options and not compact)
         self.explanation.setVisible(not compact)
         self.credential_details.setVisible(disclose and not unavailable and (
             self.preview.layout().count() > 0 or self._can_create and bool(self._credentials)))
@@ -946,21 +971,33 @@ class ExchangeResponseDialog(LocksmithDialog):
         if self.action != 'Agree':
             return
         offer = self.row['messages'][-1]
-        if offer.sad['a'].get('m'):
-            layout.addWidget(attribute_view('Sender’s description', offer.sad['a']['m']))
-            layout.addWidget(attribute_view('Review', 'Check these claims against the credential when it arrives.'))
+        plan = offer.sad['q']['dp']
+        if plan == [[]] and offer.sad.get('p'):
+            plan = self.row['messages'][-2].sad['q']['dp']
+        if any(paths in ([], ['']) for graph in plan for _, _, paths in graph):
+            self.send_button.setText('Request credential')
+        summary, supporting = offer_summary(self.vault, plan)
+        layout.addWidget(summary)
+        layout.addWidget(details_section('Identifier details', identifier_details(offer.pre, offer.sad['ri'])))
+        details = QWidget()
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        if supporting:
+            details_layout.addWidget(attribute_view('Supporting information', supporting))
         previews = exchanging.loadParsedNestedSubstreams(self.vault.hby, offer.said)
-        if not previews:
-            layout.addWidget(offer_details(self.vault, offer.sad['q'].get('dp', [])))
-            return
+        if previews:
+            details_layout.addWidget(QLabel('Credential preview'))
         for index, nest in enumerate(previews):
             sad = nest.serder.sad
             schema = sad['s']
             schemer = self.vault.hby.db.schema.get((schema,)) if isinstance(schema, str) else None
             schema = schemer.sed if schemer else schema if isinstance(schema, Mapping) else {}
+            if isinstance(sad.get('a'), Mapping) or isinstance(sad.get('A'), list):
+                details_layout.addWidget(credential_details(self.vault, sad))
+                continue
             if index:
-                layout.addWidget(attribute_view('Linked credential', credential_name(schema)))
-            layout.addWidget(attribute_view('Declared issuer', self.page._name(sad.get('i'))))
+                details_layout.addWidget(attribute_view('Linked credential', credential_name(schema)))
+            details_layout.addWidget(attribute_view('Declared issuer', self.page._name(sad.get('i'))))
             try:
                 definitions = credentialing.attribute_schemas(schema, aggregate='A' in sad)
             except ValueError:
@@ -968,8 +1005,13 @@ class ExchangeResponseDialog(LocksmithDialog):
             fields = dict.fromkeys(attribute_label(name, prop if isinstance(prop, Mapping) else {})
                                    for definition in definitions for name, prop in definition.get('properties', {}).items()
                                    if name not in ('d', 'i', 'u'))
-            layout.addWidget(attribute_view('Fields defined by schema', ', '.join(fields) or 'Field names unavailable.'))
-            layout.addWidget(attribute_view('Terms', rules_text(sad['r']) if sad.get('r') else 'No rules attached.'))
+            details_layout.addWidget(attribute_view('Fields defined by schema', ', '.join(fields) or 'Field names unavailable.'))
+            details_layout.addWidget(attribute_view('Terms', rules_text(sad['r']) if sad.get('r') else 'No rules attached.'))
+        if not details_layout.count():
+            details_layout.addWidget(attribute_view(None, 'No supporting details included.'))
+        layout.addWidget(details_section('Supporting details', details))
+        message = offer.sad['a'].get('m') or 'No note included.'
+        layout.addWidget(details_section('Sender’s note', attribute_view(None, message)))
 
     def _show_credential(self, sad):
         choice_layout = self.disclosure_choices.layout()
@@ -992,8 +1034,12 @@ class ExchangeResponseDialog(LocksmithDialog):
                                          'The offer names your choices; their values are sent after agreement.')
                 choices = self._selections.setdefault(sad['d'], {})
                 request = self.row['messages'][-1]
+                issuer_delivery = False
+                if request.sad['a'].get('preg'):
+                    credential = SerderACDC(sad=sad)
+                    issuer_delivery = (request.sad['ri'], request.pre) == (credential.israid, credential.iseaid)
                 self._disclosure_selection = DisclosureSelection(self.vault, sad['d'], choices,
-                    requested=request.sad['q'].get('dp', []))
+                    requested=request.sad['q'].get('dp', []), issuer_delivery=issuer_delivery)
                 choice_layout.addWidget(self._disclosure_selection)
                 self._disclosure_selection.show()
                 self.credential_details.toggle_button.setText('  Credential options')
@@ -1021,6 +1067,8 @@ class ExchangeResponseDialog(LocksmithDialog):
             layout.addWidget(credential_details(self.vault, node))
 
     def _send(self):
+        if self.offer_wait.pending is not None:
+            return
         if self.page.app.vault is not self.vault or not self.page._current_vault():
             self.show_error('This vault is closed.')
             return
@@ -1059,6 +1107,10 @@ class ExchangeResponseDialog(LocksmithDialog):
                 self.finished.connect(self._disconnect_presentation)
 
         except Exception as error:
+            if self.action == 'Offer' and isinstance(error, credentialing.RegistryCheckPending):
+                self.clear_error(resize_dialog=False)
+                self.offer_wait.wait(error)
+                return
             self._preview()
             if not self.error_label.text():
                 self.show_error(str(error))
@@ -1096,10 +1148,13 @@ class ExchangeResponseDialog(LocksmithDialog):
             self._auth_habitats, self._auth_panels = state, []
             for hab in habitats.values():
                 panel = WitnessAuthenticationPanel(self.page.app, hab, list(hab.kever.wits), self)
-                self.content_layout.addWidget(panel)
+                panel.layout().setContentsMargins(0, 0, 0, 0)
+                self.form_layout.addWidget(panel)
+                panel.show()
                 self._auth_panels.append(panel)
             if habitats:
                 self.send_button.setText('Authenticate and share')
+                self.fit_content(self.width())
                 return None
         codes = {}
         for panel in self._auth_panels:

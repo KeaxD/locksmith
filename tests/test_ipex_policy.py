@@ -217,8 +217,7 @@ def test_bundled_sedi_reference_offer_withholds_credentials(ipex_vaults, profile
                                          f'assets/schemas/sedi/{name}.json').read_bytes())
                for name in ('organizational-unit', 'issuing-agent')}
     for schema in schemas.values():
-        for app in (source, target):
-            app.hby.db.schema.pin((schema.said,), schema)
+        source.hby.db.schema.pin((schema.said,), schema)
         source.vault.db.issuers.pin((schema.said,), issuer.pre)
     _introduce(target, source)
     unit = _issue(source, schemas['organizational-unit'],
@@ -246,6 +245,7 @@ def test_bundled_sedi_reference_offer_withholds_credentials(ipex_vaults, profile
     assert not [value for value in private if value and value.encode() in offer.raw]
     _deliver_ipex(target.vault, stream)
     assert target.vault.exc.complete(offered)
+    assert not list(target.hby.db.schema.getTopItemIter())
     assert not credentialing.credentials(target.vault)
     agree = ipexing.respond(target.vault, offered, 'Agree')
     _deliver_ipex(source.vault, exchanging.serializeMessage(target.hby, agree))
@@ -256,7 +256,16 @@ def test_bundled_sedi_reference_offer_withholds_credentials(ipex_vaults, profile
             regk = original['rd']
             target.vault.rgy.store.accept(regk, sn, source.vault.rgy.store.seqEvent(regk, sn))
     _deliver_ipex(target.vault, exchanging.serializeMessage(source.hby, grant))
+    # A pending Grant must also recover when the holder next opens the vault.
+    target.close_vault()
+    target = ipex_vaults('sedi-unit-holder')
+    holder = target.hby.habByName('holder')
+    for _ in range(len(originals) + 1):
+        _retry_ipex(target.vault)
     assert target.vault.exc.complete(grant)
+    assert {key for (key,), _ in target.hby.db.schema.getTopItemIter()} == {
+        original['s'] for original in originals.values()}
+    assert not list(target.vault.db.issuers.getTopItemIter())
     assert target.vault.db.accepted.get((said,)) is None
     ipexing.admit(target.vault, holder, grant)
     assert credentialing.credential(target.vault, said, received=True)['sad'] == originals[said]
@@ -325,3 +334,27 @@ def test_queued_grant_rechecks_native_state_before_disclosure(ipex_vaults, monke
     assert outbox.status == 'blocked'
     assert outbox.attempts == 0
     assert not sender.deeds
+
+
+def test_grant_recovers_bundled_schema_referenced_by_an_embedded_schema(ipex_vaults):
+    from keri.acdc.messaging import acmSchemaDefault
+
+    source, target = ipex_vaults('schema-issuer'), ipex_vaults('schema-holder')
+    issuer, holder = source.hby.makeHab(name='issuer'), target.hby.makeHab(name='holder')
+    _introduce(source, target)
+    unit = next(schema for schema in credentialing.builtin_schemas().values()
+                if schema.sed['title'] == 'SEDI Organizational Unit Schema')
+    _, schema = acmSchemaDefault()
+    schema['$id'] = ''
+    schema['properties']['i'] = {'$ref': f'{unit.said}#/properties/i'}
+    acdc = acdcmap(israid=issuer.pre, schema=scheming.Schemer(sed=schema).sed,
+                   attribute={'d': '', 'i': holder.pre})
+    proof = issuer.endorse(acdc, gvrsn=kering.Vrsn_2_0)
+    grant, atc = native.grant(issuer, holder.pre, '', origin=proof)
+
+    assert target.hby.db.schema.get((unit.said,)) is None
+    _deliver_ipex(target.vault, grant.raw + atc)
+    assert target.hby.db.emse.get((grant.said, unit.said)) is not None
+    _retry_ipex(target.vault)
+    assert target.vault.exc.complete(grant.said)
+    assert target.hby.db.schema.get((unit.said,)).said == unit.said

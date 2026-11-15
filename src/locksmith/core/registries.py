@@ -15,7 +15,7 @@ from keri.core import Diger, Number, Saider, SerderACDC, SerderKERI, eventing
 from keri.help import helping
 
 from locksmith.core.credentialing import CredentialUpdateDoer
-from locksmith.core.receipting import LocksmithReceiptor
+from locksmith.core.receipting import LocksmithReceiptor, replay_through
 
 
 def _events(stream):
@@ -141,13 +141,13 @@ class RegistrySyncDoer(doing.DoDoer):
         try:
             self._open()
             self.manager = QNetworkAccessManager()
-            kel = b''.join(self.hab.db.clonePreIter(pre=self.hab.pre, gvrsn=kering.Vrsn_2_0))
             if self.registrar_url:
                 tel = self.vault.rgy.store.cloneTel(self.regk)
                 events = _events(tel)
                 if events[0].said != self.regk or events[0].israid != self.hab.pre:
                     raise ValueError('Only the registry issuer can publish this registry')
                 regeventing.vet(rip=events[0], updates=events[1:], db=self.vault.hby.db)
+                kel = b''.join(self.hab.db.clonePreIter(pre=self.hab.pre, gvrsn=kering.Vrsn_2_0))
                 payload = json.dumps({'kel': kel.decode(), 'tel': tel.decode()}).encode()
                 raw = yield from self._request(self.registrar_url.rstrip('/') + '/ingest', payload,
                                             'application/json')
@@ -161,14 +161,17 @@ class RegistrySyncDoer(doing.DoDoer):
                 event = 'registry_published'
             else:
                 base = self.observer_url.rstrip('/')
+                # The query uses the latest signing keys. Later interaction events
+                # can still be waiting for receipts and do not change those keys.
+                kel = replay_through(self.hab, self.hab.kever.lastEst.d)
+                query = eventing.query(pre=self.hab.pre, route='tels', query={'i': self.regk},
+                                       stamp=helping.nowIso8601(), version=kering.Vrsn_2_0)
+                signed = self.hab.endorse(query, last=True, framed=False, gvrsn=kering.Vrsn_2_0)
                 try:
                     yield from self._request(base + '/', kel, CESR_CONTENT_TYPE, method="PUT")
                 except kering.ValidationError as ex:
                     raise kering.ValidationError(
                         f'Observer signer key history could not be submitted. {ex}') from ex
-                query = eventing.query(pre=self.hab.pre, route='tels', query={'i': self.regk},
-                                       stamp=helping.nowIso8601(), version=kering.Vrsn_2_0)
-                signed = self.hab.endorse(query, last=True, framed=False, gvrsn=kering.Vrsn_2_0)
                 raw = yield from self._request(base + '/', bytes(signed), CESR_CONTENT_TYPE)
                 try:
                     self.result = ingest(self.vault, self.regk, raw)

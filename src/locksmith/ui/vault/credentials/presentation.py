@@ -1,4 +1,5 @@
 """Credential labels and read-only attributes shared by wallet views."""
+from collections import Counter
 from collections.abc import Mapping
 import json
 import re
@@ -6,7 +7,8 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QHBoxLayout, QWidget, QSizePolicy
 from keri.help import helping
-from keri.core import Saider
+from keri import kering
+from keri.core import Pather, Saider
 
 from locksmith.core import credentialing
 from locksmith.ui import colors
@@ -15,13 +17,16 @@ from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
 def credential_name(schema):
     schema = schema or {}
-    return schema.get('title', 'Credential')
+    return (schema.get('title') or 'Credential').removesuffix(' Schema')
 
 
 def attribute_label(name, schema):
     """Use the same readable field names in forms and credential reviews."""
     schema = schema if isinstance(schema, Mapping) else {}
     description = schema.get('title') or schema.get('description', 'Date' if name == 'dt' else name)
+    if not schema.get('title') and description.endswith(' Block') and credentialing.schema_detail(schema):
+        suffix = ' Edge Block' if description.endswith(' Edge Block') else ' Block'
+        return description.removesuffix(suffix)
     # Timestamp annotations describe wire encoding, not part of the field label.
     return description.split(' RFC-3339')[0].split(' RFC3339')[0]
 
@@ -64,11 +69,14 @@ def identity_context(vault, presenter, recipient, *, compact=False):
         row.setToolTip(pre)
         identities.addWidget(row, 1)
     layout.addLayout(identities)
-    widget.identifier_details = details_section('Identifier details', attribute_view(
-        'Names are local labels; verify the identifiers',
-        {'Presenting identifier': presenter, 'Recipient identifier': recipient}))
+    widget.identifier_details = details_section('Identifier details', identifier_details(presenter, recipient))
     layout.addWidget(widget.identifier_details)
     return widget
+
+
+def identifier_details(presenter, recipient):
+    return attribute_view('Full identifiers (names are local labels)',
+                          {'Presenting identifier': presenter, 'Recipient identifier': recipient})
 
 
 def details_section(title, content, *, expanded=False):
@@ -130,7 +138,7 @@ def rules_text(rules):
     return values or 'Rule text has not been disclosed.'
 
 
-def plan_summary(vault, plan, *, request=False):
+def request_summary(vault, plan):
     """Name schema-resolved requests without guessing aggregate positions."""
     lines = []
     for graph in plan:
@@ -142,9 +150,7 @@ def plan_summary(vault, plan, *, request=False):
             except ValueError:
                 labels = {}
             names = [labels.get(path, 'Selected information') for path in paths if path not in ('e/', 'r/')]
-            unspecified = ('No specific fields requested; you choose what to offer' if request
-                           else 'Required supporting information only')
-            text = (unspecified if not paths else 'Whole credential' if paths == ['']
+            text = ('No specific fields requested; you choose what to offer' if not paths else 'Whole credential' if paths == ['']
                     else ', '.join(dict.fromkeys(names)) or 'Supporting evidence')
             lines.append(f'{credential_name(definition)}: {text}')
     return '\n'.join(lines)
@@ -155,21 +161,85 @@ def request_details(vault, request):
     widget = QWidget()
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.addWidget(attribute_view('Requested information', plan_summary(vault, request.sad['q'].get('dp', []), request=True)))
+    layout.addWidget(attribute_view('Requested information', request_summary(vault, request.sad['q'].get('dp', []))))
     if request.sad['a'].get('m'):
         layout.addWidget(attribute_view('Requester’s message', request.sad['a']['m']))
     return widget
 
 
-def offer_details(vault, plan):
-    """Show the references and credential types disclosed by a native Offer."""
+def _offered_fields(schema, paths):
+    """Read selectors without using the sender's text or guessing aggregate positions."""
+    fields, supporting = [], []
+    sections = {'e/': 'Credential links', 'r/': 'Terms', 'a/': 'All available attributes',
+                'A/': 'All available fields'}
+    if not paths:
+        return ['The sender may share the whole credential.'], []
+    if paths == ['']:
+        return ['Whole credential'], []
+
+    for path in paths:
+        if path in sections:
+            (supporting if path in ('e/', 'r/') else fields).append(sections[path])
+            continue
+        parts = path.strip('/').split('/')
+        if parts[0] != 'a' or len(parts) < 2:
+            if len(parts) == 2 and parts[0] == 'A' and parts[1].isdigit():
+                fields.append(f'Field group {parts[1]} (field names available on receipt)')
+            else:
+                fields.append(path)
+            continue
+        definition = credentialing.schema_detail(schema.get('properties', {}).get('a')) or {}
+        label = path
+        for index, name in enumerate(parts[1:], 1):
+            properties = definition.get('properties', {})
+            if name not in properties:
+                label = path
+                break
+            # Expanding a compact block also reveals its direct scalar fields.
+            for peer, prop in properties.items():
+                peer_path = '/'.join([*parts[:index], peer])
+                if peer in ('d', 'u', name) or peer_path in paths:
+                    continue
+                if 'd' in (credentialing.schema_detail(prop) or {}).get('properties', {}):
+                    continue
+                peer_label = attribute_label(peer, prop).removesuffix(' as')
+                supporting.append(peer_label if peer in definition.get('required', []) else peer_label + ' (if present)')
+            prop = properties[name]
+            if name != 'value' or index == 1:
+                label = attribute_label(name, prop).removesuffix(' as')
+            definition = credentialing.schema_detail(prop) or {}
+        (supporting if path in ('a/i', 'a/rd') else fields).append(label)
+    return list(dict.fromkeys(fields)), list(dict.fromkeys(supporting))
+
+
+def offer_summary(vault, plan):
+    """Render the offered fields and return the supporting information for the details panel."""
     widget = QWidget()
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.addWidget(attribute_view('Proposed disclosure', plan_summary(vault, plan)))
-    layout.addWidget(attribute_view('Disclosure',
-        'Credential contents are not disclosed in this offer. Review the proposed disclosure before requesting it.'))
-    return widget
+    schemas = credentialing.request_schemas(vault)
+    linked, details = [], []
+    for graph in plan:
+        for schema, prefix, paths in graph:
+            schemer = schemas.get(schema)
+            definition = schemer.sed if schemer else {}
+            title = credential_name(definition) if schemer else schema
+            fields, supporting = _offered_fields(definition, paths)
+            if prefix == '/':
+                summary = '\n'.join(fields)
+                if not summary:
+                    summary = ('Shares the subject’s identifier and supporting details.' if 'a/i' in paths
+                               else 'Shares supporting details for this credential.')
+                layout.addWidget(attribute_view(title, summary))
+            elif fields:
+                linked.append(f"{title} · {', '.join(fields)}")
+            if supporting:
+                details.append(f"{title}: {', '.join(supporting)}")
+    if linked:
+        layout.addWidget(attribute_view('From linked credentials', '\n'.join(linked)))
+    if not any(plan):
+        layout.addWidget(attribute_view(None, 'This offer requests no credential disclosure.'))
+    return widget, '\n'.join(details)
 
 
 def credential_details(vault, sad, *, identity=True):
@@ -277,7 +347,7 @@ def _disclosure_name(names, definitions):
         definition = definition if isinstance(definition, Mapping) else {}
         label = definition.get('title') or definition.get('description')
         if label:
-            labels.append(attribute_label(name, {'description': label}))
+            labels.append(attribute_label(name, definition))
             continue
         label = re.sub(r'(?<=[a-z])(?=[A-Z0-9])', ' ', name).replace('_', ' ')
         labels.append({'i': 'Subject', 'rd': 'Registry'}.get(name, label.capitalize()))
@@ -301,7 +371,9 @@ def disclosure_fields(schema, sad=None):
         if len(names) == 1:
             definition = properties.get(names[0], {})
             value = value[names[0]] if value is not None else None
-        result.append(dict(path=path, name=_disclosure_name(names, properties), schema=definition,
+        prefix = 'A/' if path.startswith('A/') else path.rsplit('/', 1)[0] + '/'
+        result.append(dict(path=path, selectors=[prefix + name for name in names if name and '/' not in name],
+                           name=_disclosure_name(names, properties), schema=definition,
                            value=value, required=bool(set(names) & {'i', 'rd'})))
 
     def mapping(definition, values, prefix, label=None):
@@ -329,11 +401,15 @@ def disclosure_fields(schema, sad=None):
 
     if (sad and 'A' in sad) or (sad is None and 'a' not in schema.get('properties', {})):
         if sad is None:
+            occurrences = Counter(name for definition in definitions for name in definition.get('properties', {}))
             for definition in definitions:
                 properties = definition.get('properties', {})
                 names = [name for name in properties if name not in ('d', 'u')]
-                if names:
-                    add('A/' + names[0], names, properties, None)
+                # Positions are unknown until issuance. Request only by an unambiguous field name.
+                selector = next((name for name in names if occurrences[name] == 1 and name
+                                 and not name.isdecimal() and '/' not in name), None)
+                if selector:
+                    add('A/' + selector, names, properties, None)
         elif isinstance(sad.get('A'), list):
             for index, block in enumerate(sad['A'][1:], 1):
                 if not isinstance(block, Mapping):
@@ -345,6 +421,27 @@ def disclosure_fields(schema, sad=None):
     elif sad is None or isinstance(sad.get('a'), Mapping):
         mapping(definitions[0], sad['a'] if sad is not None else None, 'a/')
     return result
+
+
+def requested_field_paths(choices, requested, sad):
+    """Match requested fields to available disclosure units using protocol paths."""
+    matched = set()
+    for selector in requested:
+        if indexed := re.match(r'A/([0-9]+)(?:/|$)', selector):
+            try:
+                Pather(path=selector, relative=True).resolve(sad)
+            except (kering.KeriError, ValueError, IndexError):
+                continue
+            block = f'A/{int(indexed[1])}/'
+            matched.update(choice['path'] for choice in choices if choice['path'] == block)
+        elif selector == '' or selector.endswith('/'):
+            # The empty string selects the whole credential. A trailing slash selects a subtree.
+            matched.update(choice['path'] for choice in choices if choice['path'].startswith(selector))
+        else:
+            paths = [choice['path'] for choice in choices if selector in choice['selectors']]
+            if len(paths) == 1:
+                matched.add(paths[0])
+    return matched
 
 
 def disclosure_paths(schema, sad, selected):

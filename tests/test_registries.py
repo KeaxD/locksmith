@@ -518,6 +518,13 @@ def test_wallet_query_uses_native_observer_ingress(wallets, qapp, rotations):
     holder = receiver.hby.makeHab(name='querying-holder')
     for _ in range(rotations):
         holder.rotate(gvrsn=kering.Vrsn_2_0)
+    witness = receiver.hby.makeHab(name='witness', transferable=False)
+    holder.rotate(adds=[witness.pre], toad=1, gvrsn=kering.Vrsn_2_0)
+    signing_event = holder.kever.serder
+    signature, = witness.sign(ser=signing_event.raw, indices=[0])
+    holder.db.wigs.add((holder.pre, signing_event.said), signature)
+    holder.interact()
+    assert not holder.db.wigs.get((holder.pre, holder.kever.serder.said))
     stream = source.rgy.store.cloneTel(registry.regk)
     with habbing.openHby(name='independent-observer', temp=True,
                          version=kering.Vrsn_2_0) as hby:
@@ -540,7 +547,7 @@ def test_wallet_query_uses_native_observer_ingress(wallets, qapp, rotations):
                 _advance(runner, qapp)
             assert worker.done
             assert worker.error == ''
-            assert hby.kevers[holder.pre].sn == holder.kever.sn
+            assert hby.kevers[holder.pre].serder.said == signing_event.said
             assert worker.result.said == source.rgy.store.headEvent(registry.regk).said
             assert receiver.rgy.store.cloneTel(registry.regk) == stream
             assert worker.manager is None

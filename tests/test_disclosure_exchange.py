@@ -111,7 +111,7 @@ def test_selected_aggregate_exchange_preserves_source_and_reopens(ipex_vaults):
         page._on_row_action(row, action)
         return page._response_dialog
 
-    # The applicant requests more than the holder will consent to disclose.
+    # The verifier requests a name and two age claims. The holder has a birth date too.
     store.vault.org.update(citizen.pre, {'alias': 'Citizen'})
     request_parent = QWidget()
     parents.append(request_parent)
@@ -121,7 +121,7 @@ def test_selected_aggregate_exchange_preserves_source_and_reopens(ipex_vaults):
     request_dialog.recipient.setCurrentIndex(request_dialog.recipient.combo_box.findData(citizen.pre))
     request_fields = request_dialog._requests[root_schema.said]
     for slot, schema, paths in (
-            ('core', core_schema, ('a/givenName/value', 'a/birthDate/value')),
+            ('core', core_schema, ('a/givenName/value',)),
             ('age', source_schema, ('A/over13', 'A/over18'))):
         request_fields.add_information.setCurrentIndex(request_fields.add_information.combo_box.findData(slot))
         selector = request_fields.links[slot]['selector']
@@ -135,7 +135,7 @@ def test_selected_aggregate_exchange_preserves_source_and_reopens(ipex_vaults):
     request_dialog.send_button.click()
     request, = requests
     request_wire = deliver(store, citizen_app, request)
-    assert b'a/birthDate/value' in request_wire and b'A/over18' in request_wire
+    assert b'a/birthDate/value' not in request_wire and b'A/over18' in request_wire
     assert citizen_app.hby.db.exns.get((request,)).sad['q']['dp'] == requested_plan
     offer_dialog = review(citizen_app, request, 'Offer')
     assert offer_dialog.credential.currentData() == origin
@@ -146,11 +146,15 @@ def test_selected_aggregate_exchange_preserves_source_and_reopens(ipex_vaults):
     assert all(not box.isChecked() for widget in fields.values()
                for box in widget.checkboxes.values())
     requested_labels = '\n'.join(label.text() for label in offer_dialog.offer_review.findChildren(QLabel))
-    assert 'Birth date' in requested_labels and 'Over18 True if age>=18 else False' in requested_labels
-    fields['/e/core/_/'].checkboxes['a/givenName/value'].click()
-    fields['/e/age/_/'].checkboxes['A/3/'].click()
-    assert not fields['/e/core/_/'].checkboxes['a/birthDate/value'].isChecked()
-    assert not fields['/e/age/_/'].checkboxes['A/2/'].isChecked()
+    assert 'Birth date' not in requested_labels and 'Over18 True if age>=18 else False' in requested_labels
+    core_fields, age_fields = fields['/e/core/_/'], fields['/e/age/_/']
+    birth_date = core_fields.checkboxes['a/birthDate/value']
+    assert not birth_date.isVisible()
+    core_fields.select_all.click()
+    assert first_choice.isChecked() and not birth_date.isChecked()
+    age_fields.select_all.click()
+    assert age_fields.checkboxes['A/2/'].isChecked() and age_fields.checkboxes['A/3/'].isChecked()
+    age_fields.checkboxes['A/2/'].click()
     plan, _, _ = offer_dialog._disclosure_selection.prepare()
     selected_plan = deepcopy(plan)
     assert offer_dialog.send_button.isEnabled(), offer_dialog.error_label.text()
@@ -163,10 +167,14 @@ def test_selected_aggregate_exchange_preserves_source_and_reopens(ipex_vaults):
     assert citizen_app.hby.db.exns.get((offer,)).sad['q']['dp'] == selected_plan
     offer_wire = deliver(citizen_app, store, offer)
     assert not exchanging.loadParsedNestedSubstreams(store.hby, offer)
-    assert b'over18' not in offer_wire
+    assert b'over18' not in offer_wire and b'a/birthDate/value' not in offer_wire
     assert b'Alice' not in offer_wire and b'2010-01-01' not in offer_wire
     agree_dialog = review(store, offer, 'Agree')
     assert agree_dialog.send_button.isEnabled(), agree_dialog.error_label.text()
+    assert agree_dialog.send_button.text() == 'Request these fields'
+    offered = '\n'.join(label.text() for label in agree_dialog.offer_review.findChildren(QLabel) if label.isVisible())
+    assert 'Given name' in offered and 'Field group 3' in offered
+    assert 'Birth date' not in offered and 'over18' not in offered and 'Alice' not in offered
     agree_dialog.send_button.click()
     agree = store.hby.db.erpy.get((offer,)).qb64
     deliver(store, citizen_app, agree)

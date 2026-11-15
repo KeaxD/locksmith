@@ -47,6 +47,7 @@ def test_revocation_receipt_retry_retains_proof_and_anchor(ipex_vaults, monkeypa
     app = ipex_vaults('revoke-retry')
     witness = app.hby.makeHab(name='witness', transferable=False)
     hab = app.hby.makeHab(name='issuer', wits=[witness.pre], toad=1)
+    _deliver_ipex(app.vault, witness.witness(hab.kever.serder))
     schema = _load_schema(app, hab)
     receipts, finish = [], [True]
     def receipt(self, pre, sn=None, auths=None):

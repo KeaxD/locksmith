@@ -1,11 +1,49 @@
 """Saved KEL receipt retry and isolated watcher failures."""
+from collections import deque
 from types import SimpleNamespace
 
 from hio.base import doing
-from keri.core import eventing
+from keri.core import SerderKERI, eventing
 from locksmith.core import adjudication, receipting
 from locksmith.core.rotating import AuthenticateWitnessesDoer
 from test_keri_v2_compat import _deliver_ipex, ipex_vaults as ipex_vaults
+
+
+def test_receipting_an_earlier_rotation_limits_new_witness_catchup(ipex_vaults, monkeypatch):
+    app = ipex_vaults('rotation-receipt')
+    remote = ipex_vaults('rotation-witness')
+    witness = remote.hby.makeHab(name='witness', transferable=False)
+    hab = app.hby.makeHab(name='controller')
+    inception = hab.kever.serder
+    hab.rotate(adds=[witness.pre], toad=1)
+    rotation = hab.kever.serder
+    hab.interact()
+    later = hab.kever.serder
+    signed = witness.sign(ser=rotation.raw, indices=[0])
+    reply = eventing.messagize(eventing.receipt(pre=hab.pre, sn=rotation.sn, said=rotation.said),
+                               wigers=signed)
+    posts = []
+
+    class Client:
+        def __init__(self):
+            self.requester = SimpleNamespace(path='/')
+            self.responses = deque()
+
+        def request(self, method, path, body, headers):
+            posts.append((path, SerderKERI(raw=body).said, headers.get('Authorization')))
+            self.responses.append(SimpleNamespace(status=200 if path == '/receipts' else 204, body=reply))
+
+        def respond(self):
+            return self.responses.popleft()
+
+    monkeypatch.setattr(receipting.agenting, 'httpClient', lambda *a: (Client(), doing.Doer()))
+    worker = receipting.LocksmithReceiptor(hby=app.hby)
+    app.vault.extend([worker])
+    list(worker.receipt(hab.pre, sn=rotation.sn, auths={witness.pre: 'rotation-code'}))
+    assert posts == [('/', inception.said, None), ('/', rotation.said, None),
+                     ('/receipts', rotation.said, 'rotation-code')]
+    assert [sig.qb64 for sig in hab.db.wigs.get((hab.pre, rotation.said))] == [signed[0].qb64]
+    assert not hab.db.wigs.get((hab.pre, later.said))
 
 
 def test_hosted_receipt_lookup_uses_event_destination_and_closes_client(ipex_vaults, monkeypatch):

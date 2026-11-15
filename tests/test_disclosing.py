@@ -12,7 +12,7 @@ from keri.core import Aggor, Diger, Noncer, Parser, SealSource, SerderACDC, mess
 from keri.peer import Exchanger
 
 from locksmith.core import ipexing
-from locksmith.ui.vault.credentials.presentation import disclosure_fields, disclosure_paths
+from locksmith.ui.vault.credentials.presentation import disclosure_fields, disclosure_paths, requested_field_paths
 from test_keri_v2_compat import ipex_vaults as ipex_vaults
 from test_credentialing import _issue
 
@@ -82,6 +82,10 @@ def test_aggregate_disclosure_uses_actual_positions_and_preserves_agid():
     choices = disclosure_fields(schema, credential.sad)
     over13 = next(choice for choice in choices if choice['value'] is True)
     assert over13['path'] == 'A/3/'
+    assert requested_field_paths(choices, ['A/over13'], credential.sad) == {'A/3/'}
+
+    assert requested_field_paths(choices, ['A/3/over13'], credential.sad) == {'A/3/'}
+    assert requested_field_paths(choices, ['A/2/over13'], credential.sad) == set()
 
     _, sad = ipexing._disclose(SimpleNamespace(serder=credential), disclosure_paths(
         schema, credential.sad, [over13['path']]))
@@ -94,6 +98,18 @@ def test_aggregate_disclosure_uses_actual_positions_and_preserves_agid():
     assert partial.sad['A'][3]['over13'] is True
     assert b'over18' not in partial.raw
     assert credential.sad == original
+
+
+def test_aggregate_request_distinguishes_positions_from_field_names():
+    schema = {'properties': {'A': {'type': 'array', 'items': {'anyOf': [
+        {'type': 'object', 'properties': {'2': {}, 'label': {}, 'city': {}}},
+        {'type': 'object', 'properties': {'label': {}, 'country': {}}},
+    ]}}}}
+    sad = {'A': ['', {'2': 7, 'label': 'City', 'city': 'Paris'}, {'label': 'Country', 'country': 'France'}]}
+    choices = disclosure_fields(schema, sad)
+    assert [field['path'] for field in disclosure_fields(schema)] == ['A/city', 'A/country']
+    assert requested_field_paths(choices, ['A/2'], sad) == {'A/2/'}
+    assert requested_field_paths(choices, ['A/label'], sad) == set()
 
 
 def test_partial_proof_retains_source_seal(identity):
