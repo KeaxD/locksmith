@@ -12,6 +12,12 @@ from test_ipex_policy import _introduce
 from test_keri_v2_compat import _deliver_ipex, ipex_vaults as ipex_vaults
 
 
+def _presentation_schema(app, issuer):
+    definition = deepcopy(_load_schema(app, issuer).sed)
+    credentialing.attribute_schemas(definition)[0].setdefault('properties', {})['rd'] = {'type': 'string'}
+    return scheming.Schemer(sed=definition)
+
+
 @pytest.mark.parametrize('anchored', [False, True])
 @pytest.mark.parametrize('linked', [False, True, 'other-issuee'])
 def test_holder_prepares_one_grant_before_queueing_delivery(ipex_vaults, anchored, linked):
@@ -20,10 +26,7 @@ def test_holder_prepares_one_grant_before_queueing_delivery(ipex_vaults, anchore
     issuer = issuer_app.hby.makeHab(name='issuer')
     holder = holder_app.hby.makeHab(name='holder')
     verifier = verifier_app.hby.makeHab(name='verifier')
-    schema = _load_schema(issuer_app, issuer)
-    definition = deepcopy(schema.sed)
-    credentialing.attribute_schemas(definition)[0].setdefault('properties', {})['rd'] = {'type': 'string'}
-    schema = scheming.Schemer(sed=definition)
+    schema = _presentation_schema(issuer_app, issuer)
     for app in (issuer_app, holder_app, verifier_app):
         app.hby.db.schema.pin((schema.said,), schema)
     issuer_app.vault.db.issuers.pin((schema.said,), issuer.pre)
@@ -96,11 +99,87 @@ def test_holder_prepares_one_grant_before_queueing_delivery(ipex_vaults, anchore
         registries.ingest(verifier_app.vault, regk, issuer_app.rgy.store.cloneTel(regk))
     _deliver_ipex(verifier_app.vault, exchanging.serializeMessage(holder_app.hby, draft.said))
     assert verifier_app.vault.exc.complete(draft.said)
-    ipexing.admit(verifier_app.vault, verifier, draft.said)
+    admit, _ = ipexing.admit(verifier_app.vault, verifier, draft.said)
     assert verifier_app.vault.db.accepted.get((said,)).grant == draft.said
     holder_app.close_vault()
     holder_app = ipex_vaults('present-holder')
+    holder = holder_app.hby.habByPre(holder.pre)
+    holder_app.vault.remove([holder_app.vault.ipex_outbox])
     assert holder_app.vault.db.presentations.get((draft.said, registry.regk)) == proof
+    # HTTP submission does not establish that the verifier saw the first binding.
+    record = holder_app.vault.db.outbox.get((draft.said,))
+    record.status = 'submitted'
+    holder_app.vault.db.outbox.pin((draft.said,), record)
+    second, atc = ipexing.grant(holder_app.vault, holder, said, verifier.pre)
+    with pytest.raises(ValueError, match='waiting for a reply'):
+        ipexing.submit(holder_app.vault, holder, second, atc)
+    assert holder_app.rgy.store.head(registry.regk).qb64 == proof.update
+
+    _introduce(verifier_app, holder_app)
+    _deliver_ipex(holder_app.vault, exchanging.serializeMessage(verifier_app.hby, admit.said))
+    ipexing.submit(holder_app.vault, holder, second, atc)
+    for _ in range(128):
+        holder_app.qtask.run()
+        if holder_app.vault.exc.complete(second.said):
+            break
+    assert holder_app.vault.db.outbox.get((second.said,)).status == 'pending'
+    _introduce(holder_app, verifier_app)
+    registries.ingest(verifier_app.vault, registry.regk, holder_app.rgy.store.cloneTel(registry.regk))
+    _deliver_ipex(verifier_app.vault, exchanging.serializeMessage(holder_app.hby, second.said))
+    assert verifier_app.vault.exc.complete(second.said)
+
+
+def test_presentation_registry_reuse_after_failed_preparation_and_expiry(ipex_vaults, monkeypatch):
+    from datetime import timedelta
+    from keri import kering
+    from keri.acdc import ipexing as native
+    from keri.help import helping
+
+    app = ipex_vaults('reuse')
+    app.vault.remove([app.vault.ipex_outbox])
+    issuer, holder, verifier = [app.hby.makeHab(name=name) for name in ('issuer', 'holder', 'verifier')]
+    schema = _presentation_schema(app, issuer)
+    app.hby.db.schema.pin((schema.said,), schema)
+    app.vault.db.issuers.pin((schema.said,), issuer.pre)
+    registry = Registrar(rgy=app.rgy).makeRegistry(name='presentations', prefix=holder.pre)
+    said = _issue(app, schema, holder, attributes={'rd': registry.regk})
+
+    def present():
+        grant, atc = ipexing.grant(app.vault, holder, said, verifier.pre)
+        ipexing.submit(app.vault, holder, grant, atc)
+        for _ in range(64):
+            app.qtask.run()
+        return grant
+
+    def unavailable(*_):
+        raise OSError('Registrar unavailable')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ipexing.PresentIpexDoer, 'publish', unavailable)
+        failed = present()
+    assert app.vault.db.presentations.get((failed.said, registry.regk))
+    assert not app.vault.exc.complete(failed.said)
+    assert app.vault.db.outbox.get((failed.said,)) is None
+
+    apply, atc = native.apply(verifier, holder.pre, '', modifiers={'dp': [[[schema.said, '/', []]]]})
+    ipexing.prepare(app.vault, verifier, apply, atc)
+    policy = app.hby.db.kramCTYP.get('~')
+    now = helping.fromIso8601(apply.stamp) + timedelta(milliseconds=policy.xl - 1000)
+    monkeypatch.setattr(helping, 'nowUTC', lambda: now)
+    first_said = ipexing.respond(app.vault, apply.said, 'Grant', credential_said=said)
+    for _ in range(64):
+        app.qtask.run()
+    assert app.vault.db.outbox.get((first_said,)).status == 'pending'
+    first = app.hby.db.exns.get((first_said,))
+    now += timedelta(seconds=2)
+    assert ipexing.expiry_error(app.vault, first)
+    with pytest.raises(ValueError, match='waiting for a reply'):
+        present()
+    now += timedelta(milliseconds=policy.ll + policy.d)
+    second = present()
+    assert app.vault.db.outbox.get((second.said,)).status == 'pending'
+    with pytest.raises(kering.ValidationError, match='binding changed'):
+        ipexing.submit(app.vault, holder, first, b'')
 
 
 @pytest.mark.parametrize('est_only', [False, True])

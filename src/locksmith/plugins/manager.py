@@ -103,6 +103,9 @@ class PluginManager:
                 return status
         return None
 
+    def unpublished_mailboxes(self, vault: Any, pre: str) -> set[str]:
+        return {eid for plugin in self._plugins.values() for eid in plugin.unpublished_mailboxes(vault, pre)}
+
     def is_setup_complete(self, plugin_id: str, vault: Any) -> bool:
         """Check if a plugin's setup is complete. Non-account plugins always return True."""
         plugin = self._plugins.get(plugin_id)

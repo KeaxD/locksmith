@@ -45,7 +45,7 @@ def export_identifier_to_cesr(parent_widget: QWidget, app, identifier_alias: str
             return
 
         # Include any signed delivery routes already in the vault.
-        introduction = identifier_introduction(hab)
+        introduction = identifier_introduction(hab, vault=app.vault)
         with open(file_path, "wb") as f:
             f.write(introduction)
 

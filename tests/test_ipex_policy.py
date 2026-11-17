@@ -8,9 +8,9 @@ from keri.core import Noncer, scheming
 from keri.peer import exchanging
 
 from locksmith.core import credentialing, ipexing
-from locksmith.db.basing import IssuedCredential
+from locksmith.db.basing import IpexSubmission, IssuedCredential
 from locksmith.core.remoting import identifier_introduction
-from test_credentialing import _issue, _load_schema
+from test_credentialing import _issue, _load_schema, _verified_grant
 from test_keri_v2_compat import _deliver_ipex, _retry_ipex
 from test_keri_v2_compat import ipex_vaults as ipex_vaults
 
@@ -18,6 +18,36 @@ from test_keri_v2_compat import ipex_vaults as ipex_vaults
 def _introduce(source, target):
     for hab in source.hby.habs.values():
         _deliver_ipex(target.vault, identifier_introduction(hab))
+
+
+def test_reopen_restores_delivery_authorized_after_local_acceptance(ipex_vaults, monkeypatch):
+    _, receiver, _, holder, credential, grant = _verified_grant(ipex_vaults)
+    admit, attachment = ipexing.admit(receiver.vault, holder, grant.said)
+    wire = admit.raw + attachment
+    key = (holder.pre, grant.said)
+    outbox = receiver.vault.db.outbox
+    for index in range(32):
+        outbox.put((f'finished-{index}',), IpexSubmission(status='submitted'))
+
+    def interrupted(*args):
+        raise OSError('Outbox write interrupted')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(outbox, 'put', interrupted)
+        with pytest.raises(OSError, match='Outbox write interrupted'):
+            ipexing.admit(receiver.vault, holder, grant.said, send=True)
+    assert receiver.vault.db.receipts.get(key).send and outbox.get((admit.said,)) is None
+    accepted = receiver.vault.db.accepted.get((credential.said,))
+    receiver.close_vault()
+    receiver = ipex_vaults('receipt-receiver')
+    for _ in range(64):
+        receiver.qtask.run()
+        queued = receiver.vault.db.outbox.get((admit.said,))
+        if queued is not None:
+            break
+    assert queued == IpexSubmission()
+    assert receiver.vault.db.accepted.get((credential.said,)) == accepted
+    assert exchanging.serializeMessage(receiver.hby, admit.said) == wire
 
 
 def test_disclosure_preserves_issuer_and_issuee(ipex_vaults):

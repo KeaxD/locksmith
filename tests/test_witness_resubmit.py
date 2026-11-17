@@ -3,7 +3,8 @@ from collections import deque
 from types import SimpleNamespace
 
 from hio.base import doing
-from keri.core import SerderKERI, eventing
+from keri.core import Saider, SerderKERI, eventing
+from keri.recording import ObservedRecord
 from locksmith.core import adjudication, receipting
 from locksmith.core.rotating import AuthenticateWitnessesDoer
 from test_keri_v2_compat import _deliver_ipex, ipex_vaults as ipex_vaults
@@ -103,8 +104,6 @@ def test_failed_watcher_child_does_not_stop_other_vault_work(ipex_vaults, monkey
     hab = app.hby.makeHab(name='controller')
     closed, ticks, cues = [], [], []
     class BrokenQuery(doing.Doer):
-        def query(self, **kwa):
-            pass
         def recur(self, tyme):
             raise OSError(22, 'Invalid argument')
         def exit(self):
@@ -117,6 +116,7 @@ def test_failed_watcher_child_does_not_stop_other_vault_work(ipex_vaults, monkey
             ticks.append(tymth())
             yield tock
     app.vault.extend([worker, doing.doify(tick)])
+    worker.request(hab.pre)
     for _ in range(8):
         app.qtask.run()
     before = len(ticks)
@@ -124,6 +124,153 @@ def test_failed_watcher_child_does_not_stop_other_vault_work(ipex_vaults, monkey
         app.qtask.run()
     assert worker.done and closed and not cues
     assert len(ticks) > before
+
+
+def test_unanswered_watcher_polls_release_transports_and_keep_partial_replies(ipex_vaults, monkeypatch):
+    app = ipex_vaults('watcher-retry')
+    hab = app.hby.makeHab(name='controller')
+    wids = [app.hby.makeHab(name=name).pre for name in ('first', 'second')]
+    reports = app.hby.db.knas
+    previous = Saider(qb64=hab.kever.serder.said)
+    for wid in wids:
+        app.hby.db.obvs.pin((hab.pre, wid, hab.pre), ObservedRecord(enabled=True))
+        reports.put((hab.pre, wid), previous)
+
+    opened, closed = [], []
+    class UnansweredQuery(doing.Doer):
+        def __init__(self, *, wit, **kwa):
+            super().__init__()
+            self.wid = wit
+            opened.append(wit)
+        def recur(self, tyme):
+            return tyme >= 3  # HTTP completed without a signed notice.
+        def exit(self):
+            closed.append(self.wid)
+    monkeypatch.setattr(adjudication, 'WatcherInquisitor', UnansweredQuery)
+    watchmen = adjudication.Watchmen(app.hby, tock=1)
+    runner = doing.Doist(doers=[watchmen], tock=0.125)
+    runner.enter()
+    try:
+        for _ in range(4):
+            runner.recur()
+        reports.pin((hab.pre, wids[0]), previous)
+        for _ in range(16):
+            runner.recur()
+        assert sorted(opened) == sorted(wids) and not closed  # Both transports are still in flight.
+        for _ in range(80):
+            runner.recur()
+        assert opened.count(wids[0]) == 1 and opened.count(wids[1]) > 5
+        assert len(opened) - len(closed) <= 1
+        assert len(watchmen.doers) == 2
+        assert reports.get((hab.pre, wids[0])).qb64 == previous.qb64
+        assert reports.get((hab.pre, wids[1])) is None
+
+        # A cut preserves the database row. The remaining watcher has already
+        # advanced, even though it returns the same notice in the replacement round.
+        remote = ipex_vaults('watcher-ahead')
+        target = remote.hby.makeHab(name='controller')
+        assert target.pre == hab.pre
+        target.interact()
+        ahead = Saider(qb64=target.kever.serder.said)
+        app.hby.db.ksns.pin((ahead.qb64,), target.kever.state())
+        reports.pin((hab.pre, wids[0]), ahead)
+        app.hby.db.obvs.pin((hab.pre, wids[1], hab.pre), ObservedRecord(enabled=False))
+        disabled_count = opened.count(wids[1])
+        for _ in range(12):
+            runner.recur()
+        reports.pin((hab.pre, wids[0]), ahead)
+        runner.recur()
+        assert watchmen.cues.pull()['kin'] == 'keyStateUpdate'
+        assert opened.count(wids[1]) == disabled_count
+    finally:
+        runner.exit()
+    assert len(opened) == len(closed)
+    assert reports.get((hab.pre, wids[0])).qb64 == ahead.qb64
+    assert reports.get((hab.pre, wids[1])).qb64 == previous.qb64
+
+    app.close_vault()
+    reopened = ipex_vaults('watcher-retry')
+    watchmen = adjudication.Watchmen(reopened.hby, tock=1)
+    runner = doing.Doist(doers=[watchmen], tock=0.125)
+    runner.enter()
+    try:
+        runner.recur()
+        reopened.hby.db.knas.pin((hab.pre, wids[0]), ahead)
+        runner.recur()
+        assert watchmen.cues.pull()['kin'] == 'keyStateUpdate'
+    finally:
+        runner.exit()
+
+
+def test_watcher_paces_initial_polls_and_retries_across_identifiers(ipex_vaults, monkeypatch):
+    app = ipex_vaults('watcher-dispatch')
+    hab = app.hby.makeHab(name='controller')
+    targets = [f'target-{n}' for n in range(12)]
+    for target in targets:
+        app.hby.db.obvs.pin((hab.pre, hab.pre, target), ObservedRecord(enabled=True))
+
+    starts, active, peaks = [], set(), []
+    def accepted_without_notice(self, tymth, *, pre, **kwa):
+        self.wind(tymth)
+        yield self.tock
+        starts.append((pre, self.tyme))
+        active.add(pre)
+        peaks.append(len(active))
+        try:
+            for _ in range(12):
+                yield self.tock
+        finally:
+            active.remove(pre)
+    monkeypatch.setattr(adjudication.WatcherInquisitor, 'execute', accepted_without_notice)
+    watchmen = adjudication.Watchmen(app.hby, tock=1)
+    runner = doing.Doist(doers=[watchmen], tock=0.125)
+    runner.enter()
+    try:
+        for _ in range(160):
+            runner.recur()
+        first_two_rounds = starts[:2 * len(targets)]
+        assert sorted(target for target, _ in first_two_rounds) == sorted(targets * 2)
+        assert len({tyme for _, tyme in starts}) == len(starts)
+        assert max(peaks) <= watchmen.MaxRequests
+    finally:
+        runner.exit()
+    assert not active
+
+
+def test_watcher_replay_retries_and_notifies_only_after_local_acceptance(ipex_vaults, monkeypatch):
+    app = ipex_vaults('watcher-replay')
+    hab = app.hby.makeHab(name='controller')
+    target = ipex_vaults('watcher-replay-target').hby.makeHab(name='observed')
+    _deliver_ipex(app.vault, target.msgOwnEvent(sn=0))
+    rotation = target.rotate()
+    state = adjudication.watching.DiffState(target.pre, hab.pre, 'ahead', 1, target.kever.serder.said)
+    app.hby.db.obvs.pin((hab.pre, hab.pre, target.pre), ObservedRecord(enabled=True))
+
+    requests, notifications = [], []
+    def replay(self, tymth, *, query, **kwa):
+        self.wind(tymth)
+        yield self.tock
+        requests.append(query)
+        yield self.tock
+        if len(requests) == 2:
+            _deliver_ipex(app.vault, rotation)
+    monkeypatch.setattr(adjudication.WatcherInquisitor, 'execute', replay)
+    authority = adjudication.KeyStateVarianceAuthority(app.hby, SimpleNamespace(add=notifications.append))
+    update = dict(kin='keyStateUpdate', cid=hab.pre, aheads=[state])
+    authority.cues.extend([update, update])
+    runner = doing.Doist(doers=[authority], tock=1.0)
+    runner.enter()
+    try:
+        for _ in range(16):
+            runner.recur()
+        assert requests == [{'s': '1', 'fn': '1'}] and not notifications
+        for _ in range(32):
+            runner.recur()
+        assert requests == [{'s': '1', 'fn': '1'}] * 2
+        assert notifications == [dict(r='/keystate/update', pre=target.pre, sn=1, dig=state.dig)]
+        assert not authority.doers
+    finally:
+        runner.exit()
 
 
 def test_receipt_lookup_can_reach_quorum_without_one_endpoint(ipex_vaults, monkeypatch):

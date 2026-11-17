@@ -15,7 +15,7 @@ from locksmith.ui import colors
 from locksmith.core import credentialing
 from locksmith.ui.vault.credentials.presentation import credential_name, identifier_name, date_label, status_label
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
-from locksmith.ui.vault.shared.base_list_page import BaseListPage
+from locksmith.ui.vault.credentials.inventory import CredentialInventoryPage
 from locksmith.ui.vault.credentials.issued.delete import DeleteIssuedCredentialDialog
 from locksmith.ui.vault.credentials.issued.grant import GrantCredentialDialog
 from locksmith.ui.vault.credentials.issued.issue import IssueCredentialDialog
@@ -28,13 +28,21 @@ if TYPE_CHECKING:
 logger = help.ogler.getLogger(__name__)
 
 
-class IssuedCredentialsListPage(BaseListPage):
+class IssuedCredentialsListPage(CredentialInventoryPage):
     """
     Issued credentials list content page.
 
     This is a content-only page that displays within the VaultPage container.
     The VaultPage manages the navigation menu.
     """
+
+    inventory_events = {
+        ('IssueCredentialDoer', 'credential_issued'),
+        ('IssueCredentialDoer', 'credential_issuance_failed'),
+        ('RevokeCredentialDoer', 'credential_revoked'),
+        ('RevokeCredentialDoer', 'credential_revocation_failed'),
+        ('DeleteIssuedCredential', 'credential_deleted'),
+    }
 
     def __init__(self, parent: "VaultPage" = None):
         """
@@ -44,10 +52,6 @@ class IssuedCredentialsListPage(BaseListPage):
             parent: Parent widget (VaultPage container)
         """
         super().__init__(parent)
-
-        self.vault_name = None
-        self.parent = parent
-        self.app = self.parent.app
 
         # Ensure widget fills parent
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -97,7 +101,7 @@ class IssuedCredentialsListPage(BaseListPage):
 
         logger.info("IssuedCredentialsListPage initialized with table widget")
 
-    def _load_issued_credentials_data(self, *, reset_page=False):
+    def _load_rows(self, *, reset_page=False):
         """
         Load issued credentials data from the opened vault.
 
@@ -143,6 +147,7 @@ class IssuedCredentialsListPage(BaseListPage):
                     cred_dict['_actions'] = ['Resume issuance']
                 issued_credentials_data.append(cred_dict)
 
+            self._watch_signers(creds)
             self.table.set_static_data(issued_credentials_data, reset_page=reset_page)
             logger.info(f"Loaded {len(issued_credentials_data)} issued credentials")
         except Exception as e:
@@ -220,53 +225,3 @@ class IssuedCredentialsListPage(BaseListPage):
             logger.info(f"Export issued credential: {credential_schema}")
         else:
             logger.info(f"Action '{action}' not yet implemented")
-
-    def set_vault_name(self, vault_name: str):
-        """
-        Set the vault name for this page and load credentials data.
-
-        This is called by VaultPage.on_show() after a vault is opened,
-        ensuring that self.app.vault.hby is available.
-
-        Args:
-            vault_name: Name of the open vault
-        """
-        self.vault_name = vault_name
-
-        # Now that the vault is open and hby is available, load the data
-        if self.app.vault and self.app.vault.hby:
-            self._load_issued_credentials_data(reset_page=True)
-
-            # Connect to vault signal bridge for automatic list updates
-            if hasattr(self.app.vault, 'signals'):
-                self.app.vault.signals.doer_event.connect(self._on_doer_event)
-                logger.info("IssuedCredentialsListPage: Connected to vault signal bridge")
-        else:
-            logger.warning(f"Cannot load issued credentials data - vault or hby not available")
-
-    def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
-        """
-        Handle doer events from the signal bridge.
-
-        Args:
-            doer_name: Name of the doer that emitted the event
-            event_type: Type of event
-            data: Event data dictionary
-        """
-        logger.debug(f"IssuedCredentialsListPage received doer_event: {doer_name} - {event_type}")
-
-        if doer_name == 'RegistryEvidence' and event_type == 'status_checked':
-            self._load_issued_credentials_data()
-
-        if doer_name == "IssueCredentialDoer" and event_type in ("credential_issued", "credential_issuance_failed"):
-            self._load_issued_credentials_data()
-
-        # Refresh list when a credential is revoked
-        elif doer_name == "RevokeCredentialDoer" and event_type in ("credential_revoked", "credential_revocation_failed"):
-            logger.info(f"Credential revoked: {data.get('schema')}, refreshing list")
-            self._load_issued_credentials_data()
-
-        # Refresh list when an issued credential is deleted
-        elif doer_name == "DeleteIssuedCredential" and event_type == "credential_deleted":
-            logger.info(f"Issued credential deleted: {data.get('schema')}, refreshing list")
-            self._load_issued_credentials_data()

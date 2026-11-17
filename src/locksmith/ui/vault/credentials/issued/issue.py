@@ -1218,12 +1218,12 @@ class IssueCredentialDialog(LocksmithDialog):
     def _complete_issuance(self, codes=None, *, review_only=False, approval=None):
         if not self._current_vault():
             return
-        if self.request_said:
+        if self.request_said and not self.resume:
             request = self.vault.hby.db.exns.get((self.request_said,))
             if ('Offer' not in ipexing.responses(self.vault, request)
                     or self.vault.db.issuers.get((ipexing.request_schema(request),)) != request.sad['ri']):
                 self._set_primary_button_idle()
-                self.show_error(ipexing.expiry_error(self.vault, request)
+                self.show_error(ipexing.exchange_error(self.vault, request)
                                 or 'This request has changed. Return to Activity to review it.')
                 return
         schema_said = self.schema_dropdown.currentData()

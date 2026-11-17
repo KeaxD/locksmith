@@ -2,12 +2,12 @@
 from PySide6.QtCore import Qt, Signal, QSignalBlocker
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 
-from locksmith.core import credentialing, ipexing
+from locksmith.core import credentialing, ipexing, sedi
 from locksmith.ui.vault.shared.messaging import prepare_messaging
 from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import LocksmithButton, LocksmithDialog, LocksmithInvertedButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
-from locksmith.ui.vault.credentials.disclosure import DisclosureFields, DisclosureSelection, OfferRegistryWait
+from locksmith.ui.vault.credentials.disclosure import DisclosureFields, DisclosureSelection, RegistryCheckWait
 from locksmith.ui.vault.credentials.presentation import attribute_label, credential_name, identifier_name
 from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
 from locksmith.ui.vault.shared.witness_auth_mixin import WitnessAuthenticationPanel
@@ -21,6 +21,7 @@ class RequestDisclosure(QWidget):
     def __init__(self, schema, schemas, parent=None):
         super().__init__(parent)
         self.schemas = schemas
+        self.default_sources = sedi.BESPOKE_SOURCES if schema.get('$id') == sedi.BESPOKE else {}
         self.links = {}
         edges = credentialing.schema_detail(schema.get('properties', {}).get('e')) or {}
         self.slots = {name: detail for name, definition in edges.get('properties', {}).items()
@@ -76,6 +77,8 @@ class RequestDisclosure(QWidget):
         if fixed and selector.count() == 2:
             selector.setCurrentIndex(1)
             selector.setEnabled(False)
+        elif fixed is None and (default := self.default_sources.get(name)) in self.schemas:
+            selector.setCurrentIndex(selector.combo_box.findData(default))
         self._available_links()
         self.changed.emit()
 
@@ -226,7 +229,7 @@ class StartExchangeDialog(LocksmithDialog):
                          content=content, buttons=buttons, show_title_divider=False)
         self.error_label.setTextFormat(Qt.TextFormat.PlainText)
         self.fit_content(640 if action == 'Apply' and intent == 'issuance' else 540)
-        self.offer_wait = OfferRegistryWait(self, content, self._send, self._messaging_error)
+        self.registry_wait = RegistryCheckWait(self, content, self._send, self._messaging_error)
         cancel.clicked.connect(self.close)
         self.send_button.clicked.connect(self._send)
         self.sender.currentIndexChanged.connect(self._update_recipients)
@@ -275,7 +278,7 @@ class StartExchangeDialog(LocksmithDialog):
                 if said:
                     if said not in self._requests:
                         request = RequestDisclosure(self.schemas[said].sed, self.schemas)
-                        request.changed.connect(self._request_changed)
+                        request.changed.connect(self._check_route)
                         self._requests[said] = request
                         self.preview.layout().addWidget(request)
                     self._requests[said].show()
@@ -298,15 +301,12 @@ class StartExchangeDialog(LocksmithDialog):
                 if said:
                     if said not in self._offers:
                         offer = DisclosureSelection(self.vault, said)
-                        offer.changed.connect(self._request_changed)
+                        offer.changed.connect(self._check_route)
                         self._offers[said] = offer
                         self.preview.layout().addWidget(offer)
                     self._offers[said].show()
             except Exception as error:
                 self._offer_error = str(error)
-        self._check_route()
-
-    def _request_changed(self):
         self._check_route()
 
     def _check_route(self, *_):
@@ -355,7 +355,7 @@ class StartExchangeDialog(LocksmithDialog):
         missing_recipient = False
         if hab is not None and recipient and recipient != hab.pre and not error:
             try:
-                ipexing._require_route(hab, recipient)
+                ipexing._require_route(self.vault, hab, recipient)
             except ipexing.MissingRouteError as ex:
                 error = str(ex)
                 missing_recipient = True
@@ -441,7 +441,7 @@ class StartExchangeDialog(LocksmithDialog):
             self.show_error(f"{status}Your request has not been sent. {data['error']}")
 
     def _send(self):
-        if self.offer_wait.pending is not None:
+        if self.registry_wait.pending is not None:
             return
         if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
             self.error.setText('This vault is closed.')
@@ -497,7 +497,7 @@ class StartExchangeDialog(LocksmithDialog):
         except Exception as error:
             if self.action == 'Offer' and isinstance(error, credentialing.RegistryCheckPending):
                 self.error.hide()
-                self.offer_wait.wait(error)
+                self.registry_wait.wait(error)
                 return
             self.send_button.setEnabled(True)
             self.show_error(str(error))

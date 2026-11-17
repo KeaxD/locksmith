@@ -1,6 +1,8 @@
 """Publish registry evidence and verify observer replies against the wallet KEL."""
 import json
 import uuid
+from heapq import nsmallest
+from itertools import chain
 from time import monotonic
 
 from hio.base import doing
@@ -15,7 +17,11 @@ from keri.core import Diger, Number, Saider, SerderACDC, SerderKERI, eventing
 from keri.help import helping
 
 from locksmith.core.credentialing import CredentialUpdateDoer
-from locksmith.core.receipting import LocksmithReceiptor, replay_through
+from locksmith.core.receipting import LocksmithReceiptor, reverse_kel
+
+
+# Each history reader yields after four milliseconds of local work.
+ScanSeconds = 0.004
 
 
 def _events(stream):
@@ -135,19 +141,31 @@ class RegistrySyncDoer(doing.DoDoer):
                 reply.abort()
             reply.deleteLater()
 
+    def _kel(self, messages, *, reverse=False):
+        chunks = []
+        deadline = monotonic() + ScanSeconds
+        for msg in messages:
+            chunks.append(msg)
+            if monotonic() >= deadline:
+                yield self.tock
+                self._open()
+                deadline = monotonic() + ScanSeconds
+        return b''.join(reversed(chunks) if reverse else chunks)
+
     def sync_do(self, tymth, tock=0.0, **opts):
         self.wind(tymth)
         yield self.tock
         try:
             self._open()
             self.manager = QNetworkAccessManager()
+            data = {'registry': self.regk, 'success': True}
             if self.registrar_url:
                 tel = self.vault.rgy.store.cloneTel(self.regk)
                 events = _events(tel)
                 if events[0].said != self.regk or events[0].israid != self.hab.pre:
                     raise ValueError('Only the registry issuer can publish this registry')
                 regeventing.vet(rip=events[0], updates=events[1:], db=self.vault.hby.db)
-                kel = b''.join(self.hab.db.clonePreIter(pre=self.hab.pre, gvrsn=kering.Vrsn_2_0))
+                kel = yield from self._kel(self.hab.db.clonePreIter(pre=self.hab.pre, gvrsn=kering.Vrsn_2_0))
                 payload = json.dumps({'kel': kel.decode(), 'tel': tel.decode()}).encode()
                 raw = yield from self._request(self.registrar_url.rstrip('/') + '/ingest', payload,
                                             'application/json')
@@ -163,7 +181,10 @@ class RegistrySyncDoer(doing.DoDoer):
                 base = self.observer_url.rstrip('/')
                 # The query uses the latest signing keys. Later interaction events
                 # can still be waiting for receipts and do not change those keys.
-                kel = replay_through(self.hab, self.hab.kever.lastEst.d)
+                signer = self.hab.kever.lastEst.d
+                kel = yield from self._kel(reverse_kel(self.hab, signer), reverse=True)
+                if self.hab.kever.lastEst.d != signer:
+                    raise kering.ValidationError('Signing keys changed while preparing the observer query')
                 query = eventing.query(pre=self.hab.pre, route='tels', query={'i': self.regk},
                                        stamp=helping.nowIso8601(), version=kering.Vrsn_2_0)
                 signed = self.hab.endorse(query, last=True, framed=False, gvrsn=kering.Vrsn_2_0)
@@ -173,6 +194,7 @@ class RegistrySyncDoer(doing.DoDoer):
                     raise kering.ValidationError(
                         f'Observer signer key history could not be submitted. {ex}') from ex
                 raw = yield from self._request(base + '/', bytes(signed), CESR_CONTENT_TYPE)
+                previous = self.vault.rgy.store.head(self.regk)
                 try:
                     self.result = ingest(self.vault, self.regk, raw)
                 except kering.MissingAnchorError:
@@ -194,9 +216,10 @@ class RegistrySyncDoer(doing.DoDoer):
                         yield self.tock
                     # The normal mailbox parser and Kevery must accept the replay.
                     self.result = ingest(self.vault, self.regk, raw)
+                data['changed'] = self.querier is not None or previous is None or previous.qb64 != self.result.said
                 event = 'registry_loaded'
             if signals := getattr(self.vault, 'signals', None):
-                signals.emit_doer_event('RegistrySync', event, {'registry': self.regk, 'success': True})
+                signals.emit_doer_event('RegistrySync', event, data)
         except Exception as ex:
             self.error = str(ex)
             if signals := getattr(self.vault, 'signals', None):
@@ -234,6 +257,7 @@ class RegistryEvidenceDoer(doing.DoDoer):
 
     Refresh = 60.0
     Retry = 5.0
+    ConcurrentPerService = 2
 
     def __init__(self, vault, **kwa):
         self.vault = vault
@@ -241,8 +265,10 @@ class RegistryEvidenceDoer(doing.DoDoer):
         self.registrar_url = config.get('registrar')
         self.observer_url = config.get('observer')
         self.errors = {}
+        self._issuers = {}
+        self._restore_grants = True
         self._requests, self._fetched, self._published = {}, {}, {}
-        self._active, self._retry = {}, {}
+        self._active, self._next_attempt = {}, {}
         super().__init__(doers=[doing.doify(self.sync_do)], **kwa)
 
     def _configure(self):
@@ -253,7 +279,7 @@ class RegistryEvidenceDoer(doing.DoDoer):
             self._active.clear()
             self._fetched.clear()
             self._published.clear()
-            self._retry.clear()
+            self._next_attempt.clear()
             self.errors.clear()
             self.registrar_url, self.observer_url = endpoints
 
@@ -266,10 +292,14 @@ class RegistryEvidenceDoer(doing.DoDoer):
         if not self.observer_url:
             self.errors[regk] = 'Open Settings and configure an observer URL to verify current registry status'
             return False
+        return self._fresh(regk, monotonic())
+
+    def _fresh(self, regk, now):
         fetched = self._fetched.get(regk)
+        if fetched is None or now - fetched[1] >= self.Refresh:
+            return False
         head = self.vault.rgy.store.head(regk)
-        return bool(fetched and head and fetched[0] == head.qb64
-                    and monotonic() - fetched[1] < self.Refresh)
+        return bool(head and fetched[0] == head.qb64)
 
     def published(self, regk):
         """Return whether the registrar accepted the current local registry head."""
@@ -277,19 +307,59 @@ class RegistryEvidenceDoer(doing.DoDoer):
         head = self.vault.rgy.store.head(regk)
         return bool(head and self._published.get(regk) == head.qb64)
 
+    def _publications(self):
+        for regk, issuer in self._issuers.items():
+            if (hab := self.vault.hby.habByPre(issuer)) is not None:
+                head = self.vault.rgy.store.head(regk)
+                if head and self._published.get(regk) != head.qb64:
+                    yield regk, hab, head.qb64
+
+    def _dispatch(self, operation, candidates, now):
+        slots = self.ConcurrentPerService - sum(op == operation for op, _ in self._active)
+        if slots <= 0:
+            return
+        # Serve the oldest due request, even when new registries keep arriving.
+        due = []
+        for regk, hab, head in candidates:
+            key = (operation, regk)
+            eligible = self._next_attempt.setdefault(key, now)
+            if key not in self._active and eligible <= now:
+                due.append((eligible, regk, hab, head))
+        for _, regk, hab, head in nsmallest(slots, due, key=lambda item: item[0]):
+            if operation == 'fetch':
+                worker = RegistrySyncDoer(self.vault, hab, regk, observer_url=self.observer_url)
+            else:
+                worker = RegistrySyncDoer(self.vault, hab, regk, registrar_url=self.registrar_url)
+                worker.published_head = head
+            self._active[operation, regk] = worker
+            self.extend([worker])
+
     def _discover(self, proofs):
         from keri.peer import exchanging
 
-        default = next(iter(self.vault.hby.habs.values()), None)
-        if default is None:
-            return
-        # Existing accepted registry heads are polled even after a restart.
+        default = next(iter(self.vault.hby.habs.values()))
+        deadline = monotonic() + ScanSeconds
         for (regk,), _ in self.vault.rgy.baser.heads.getTopItemIter():
-            self._requests.setdefault(regk, default)
-        grants = {record.grant for _, record in self.vault.db.accepted.getTopItemIter()}
-        grants.update(said for (said,), _ in self.vault.hby.db.epse.getTopItemIter())
-        grants.update(proofs)
+            if self.observer_url:
+                self._requests.setdefault(regk, default)
+            if self.registrar_url and regk not in self._issuers:
+                # The registry SAID fixes the issuer. Ownership can change when a vault gains a habitat.
+                if rip := self.vault.rgy.store.seqEvent(regk, 0):
+                    self._issuers[regk] = rip.israid
+            if monotonic() >= deadline:
+                yield self.tock
+                deadline = monotonic() + ScanSeconds
+        if not self.observer_url:
+            return
+        proofs.update(said for (said,), _ in self.vault.hby.db.epse.getTopItemIter())
+        grants = iter(proofs)
+        if self._restore_grants:
+            # Rebuild older wallets once. New admissions already call ensure for each registry.
+            grants = chain(grants, (record.grant for _, record in self.vault.db.accepted.getTopItemIter()))
         for said in grants:
+            if monotonic() >= deadline:
+                yield self.tock
+                deadline = monotonic() + ScanSeconds
             exn = (self.vault.hby.db.epse.get((said,))
                    or self.vault.hby.db.exns.get((said,)))
             if exn is None:
@@ -298,10 +368,12 @@ class RegistryEvidenceDoer(doing.DoDoer):
             for nest in exchanging.loadParsedNestedSubstreams(self.vault.hby, said):
                 for regk in required(nest.serder.sad):
                     self._requests.setdefault(regk, hab)
+        self._restore_grants = False
 
     def sync_do(self, tymth, tock=0.0, **opts):
         self.wind(tymth)
         yield self.tock
+        next_discovery = 0.0
         try:
             while not getattr(self.vault, 'closed', False) and self.vault.hby.db.opened:
                 self._configure()
@@ -311,12 +383,13 @@ class RegistryEvidenceDoer(doing.DoDoer):
                         continue
                     operation, regk = key
                     del self._active[key]
+                    self.remove([worker])
                     if worker.error:
                         self.errors[regk] = worker.error
-                        self._retry[key] = now + self.Retry
+                        self._next_attempt[key] = now + self.Retry
                     else:
                         self.errors.pop(regk, None)
-                        self._retry.pop(key, None)
+                        self._next_attempt[key] = now
                         if operation == 'fetch':
                             self._fetched[regk] = (worker.result.said, now)
                         else:
@@ -336,31 +409,17 @@ class RegistryEvidenceDoer(doing.DoDoer):
                         cues.append(cue)
                 # Saved messages already notify the UI through IpexHandler.handle.
                 # Proof escrows persist, so retrieval can resume after configuration.
+                if ((self.registrar_url or self.observer_url) and self.vault.hby.habs
+                        and (proofs or self.tyme >= next_discovery)):
+                    yield from self._discover(proofs)
+                    next_discovery = self.tyme + 1.0
+                    self._configure()  # Settings may change while discovery yields.
                 if self.observer_url:
-                    self._discover(proofs)
-                    for regk, hab in list(self._requests.items()):
-                        key = ('fetch', regk)
-                        if (not self.ensure(regk, hab) and key not in self._active
-                                and now >= self._retry.get(key, 0)):
-                            worker = RegistrySyncDoer(self.vault, hab, regk,
-                                                      observer_url=self.observer_url)
-                            self._active[key] = worker
-                            self.extend([worker])
+                    fetches = ((regk, hab, None) for regk, hab in self._requests.items() if not self._fresh(regk, now))
+                    self._dispatch('fetch', fetches, now)
                 if self.registrar_url:
-                    for (regk,), head in self.vault.rgy.baser.heads.getTopItemIter():
-                        rip = self.vault.rgy.store.seqEvent(regk, 0)
-                        hab = self.vault.hby.habByPre(rip.israid) if rip else None
-                        if hab is None:
-                            continue
-                        key = ('publish', regk)
-                        if (head is not None and not self.published(regk) and key not in self._active
-                                and now >= self._retry.get(key, 0)):
-                            worker = RegistrySyncDoer(self.vault, hab, regk,
-                                                      registrar_url=self.registrar_url)
-                            worker.published_head = head.qb64
-                            self._active[key] = worker
-                            self.extend([worker])
-                yield 1.0
+                    self._dispatch('publish', self._publications(), now)
+                yield 0.125 if self._active else 1.0
         finally:
             self.remove(list(self._active.values()))
             self._active.clear()

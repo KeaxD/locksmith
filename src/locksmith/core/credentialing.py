@@ -276,11 +276,21 @@ def credential(vault, said, received=False, *, grant_said=None):
             'status': status, 'proof': proof, 'artifacts': artifacts}
 
 
-def credentials(vault, received=None):
+def credential_saids(vault, received=None):
+    """Read inventory keys in display order without loading credential proofs."""
     stores = ([vault.db.accepted] if received is True else
               [vault.db.issued] if received is False else [vault.db.issued, vault.db.accepted])
-    saids = dict.fromkeys(said for store in stores for (said,), _ in store.getTopItemIter())
-    return [credential(vault, said, received=received is True) for said in saids]
+    saids = {}
+    with vault.db.env.begin() as txn:
+        for store in stores:
+            with txn.cursor(store.sdb) as cursor:
+                for key in cursor.iternext(values=False):
+                    saids[key.decode()] = None
+    return list(saids)
+
+
+def credentials(vault, received=None):
+    return [credential(vault, said, received=received is True) for said in credential_saids(vault, received)]
 
 
 def delete_credential(vault, said, received=False):
@@ -594,12 +604,6 @@ class IssueCredentialDoer(CredentialUpdateDoer):
                 raise kering.ValidationError(f'Load credential schema {self.schema_said} before issuing it')
             request = None
             requested_registry = None
-            if self.request_said:
-                from locksmith.core import ipexing
-                request = self.vault.hby.db.exns.get((self.request_said,))
-                if ('Offer' not in ipexing.responses(self.vault, request) or request.sad['ri'] != issuer
-                        or request.pre != self.recipient_pre or ipexing.request_schema(request) != self.schema_said):
-                    raise ValueError('This request has changed. Review it before issuing.')
             operation = self.resume
             if operation is None:
                 inputs = [issuer, self.schema_said, self.recipient_pre, self.authentication,
@@ -611,13 +615,20 @@ class IssueCredentialDoer(CredentialUpdateDoer):
             if resuming:
                 rip = SerderACDC(raw=pending.inception.encode()) if pending.inception else None
                 acdc = SerderACDC(raw=pending.raw.encode())
+                # Finish the saved credential even if its original Apply has closed.
                 if (acdc.israid != issuer or acdc.schema != self.schema_said or pending.recipient != self.recipient_pre
                         or self.authentication != ('registry' if rip else 'anchor')):
                     raise ValueError('The saved issuance does not match this issuer, subject, schema or authentication.')
             elif self.resume:
                 raise ValueError('This issuance is no longer pending. Check Issued Credentials.')
-            elif request and next(self.vault.db.pending_issuances.getTopItemIter((self.request_said,)), None):
-                raise ValueError('Reopen this request to resume its saved credential.')
+            elif self.request_said:
+                from locksmith.core import ipexing
+                request = self.vault.hby.db.exns.get((self.request_said,))
+                if ('Offer' not in ipexing.responses(self.vault, request) or request.sad['ri'] != issuer
+                        or request.pre != self.recipient_pre or ipexing.request_schema(request) != self.schema_said):
+                    raise ValueError('This request has changed. Review it before issuing.')
+                if next(self.vault.db.pending_issuances.getTopItemIter((self.request_said,)), None):
+                    raise ValueError('Reopen this request to resume its saved credential.')
             tip = hab.kever.serder.said
             if self.authentication != 'signature':
                 missing = yield from self.missing_receipts(hab, tip)

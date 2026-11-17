@@ -10,7 +10,7 @@ from keri.help import helping
 from keri import kering
 from keri.core import Pather, Saider
 
-from locksmith.core import credentialing
+from locksmith.core import credentialing, sedi
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
@@ -18,6 +18,30 @@ from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 def credential_name(schema):
     schema = schema or {}
     return (schema.get('title') or 'Credential').removesuffix(' Schema')
+
+
+def show_delegations(layout, vault, origin, nests):
+    sources = sedi.grant_delegations(vault, origin, nests)
+    if sources is None:
+        label = QLabel('Delegation verification incomplete')
+        label.setStyleSheet(f'color: {colors.WARNING_TEXT};')
+        layout.addWidget(label)
+    elif sources:
+        heading = QLabel('Verified delegation links')
+        heading.setToolTip('Checked against the issuer and registry evidence in this wallet.')
+        layout.addWidget(heading)
+        for source in sources:
+            schema = source.schema
+            if isinstance(schema, str):
+                schemer = vault.hby.db.schema.get((schema,))
+                schema = schemer.sed if schemer else {}
+            label = QLabel(f'✓ {credential_name(schema)}\n'
+                           f'{identifier_name(vault, source.israid)} → {identifier_name(vault, source.iseaid)}')
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            label.setStyleSheet(f'color: {colors.SUCCESS_TEXT};')
+            label.setToolTip(f'Issuer: {source.israid}\nDelegate: {source.iseaid}')
+            layout.addWidget(label)
 
 
 def attribute_label(name, schema):

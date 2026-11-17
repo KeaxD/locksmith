@@ -12,19 +12,23 @@ from keri import kering
 from locksmith.core.remoting import message_version
 
 
-def replay_through(hab, said):
-    """Clone the controller's KEL through the selected event on its own branch."""
-    messages = []
+def reverse_kel(hab, said):
+    """Yield cloned events from the selected branch tip back to inception."""
     expected_sn = None
     while True:
         event = hab.db.evts.get((hab.pre, said))
         fn = hab.db.fons.get((hab.pre, said))
         if event is None or fn is None or (expected_sn is not None and event.sn != expected_sn):
             raise kering.MissingEntryError(f'Incomplete key event history at {said}')
-        messages.append(hab.db.cloneEvtMsg(pre=hab.pre, fn=fn.num, dig=said, gvrsn=kering.Vrsn_2_0))
+        yield hab.db.cloneEvtMsg(pre=hab.pre, fn=fn.num, dig=said, gvrsn=kering.Vrsn_2_0)
         if event.sn == 0:
-            return b''.join(reversed(messages))
+            return
         said, expected_sn = event.prior, event.sn - 1
+
+
+def replay_through(hab, said):
+    """Clone the controller's KEL through the selected event on its own branch."""
+    return b''.join(reversed(list(reverse_kel(hab, said))))
 
 
 class LocksmithReceiptor(agenting.Receiptor):

@@ -70,30 +70,35 @@ Onboarding Responsibilities
 After onboarding, the plugin sets up receiving for local individual identifiers
 when ``bootstrap.mailbox_enabled`` is JSON ``true``. New identifiers use the same
 account automatically. Namespaced internal identifiers and groups are excluded.
-A missing or false capability pauses setup without changing account or witness
-state. The provider page remains available for witness management.
+A missing or false capability pauses provider setup. An independent, signed
+receiving route remains usable if Boot disables mailboxes or goes offline.
 
 Setup verifies the signed allocation, publishes the recipient's signed mailbox
 authorization to the allocated operator, and reads its introduction back. A fresh
-reader must verify the receiving address before setup reports success. The
-operator must serve ``/oobi/{recipient}/mailbox/{operator}``. Use a mailbox service
-that supports recipient introductions; an operator-only OOBI is insufficient.
+reader must verify the receiving address before Locksmith installs the route.
+The operator must serve ``/oobi/{recipient}/mailbox/{operator}``.
 
-Temporary failures receive at most three retries after the first attempt. The
-attempt count and next attempt time survive closing the vault. Exhausted or
-rejected setup waits for **Connection details → Retry connection**. A failed
-replacement leaves the previous authorization in place.
+Temporary provider setup failures receive at most three retries after the first attempt. The
+attempt count and next attempt time survive closing the vault. If receiving is
+unavailable, choose **Connection details → Retry connection**. If another route
+still works, choose **Retry Mailbox** on the **KERI Foundation Identifiers**
+row to retry provider setup. A failed replacement keeps the previous mailbox
+authorization. Retry an interrupted setup before sharing the new address.
 
 **Copy contact link** shares the mailbox-hosted introduction. **Share introduction**
 exports the signed public history. It includes the service location and mailbox
 authorization when available.
 Neither operation exports private keys or grants another user mailbox read access.
 
-Credential messages use this explicit mailbox route. Witnesses continue to
-receive control traffic. When an existing identifier first gets a mailbox,
-Locksmith reads its saved witness credential queues for 24 hours. The deadline
-survives a restart. This does not delete messages from the old queues. Exchange
-new introductions with contacts so they use the new route.
+For HTTP(S) delivery, Locksmith selects an authorized controller or agent
+route before a mailbox route.
+Locksmith reads credentials, forwarded receipts, KEL replays, and replies at
+authorized mailboxes. It continues to read control messages at witnesses.
+Use **Retry connection** on the local identifier to resume a paused witness read.
+When an identifier first gets a mailbox, Locksmith reads its saved witness
+credential queues for 24 hours. The deadline survives a restart. This does
+not delete messages from the old queues. Exchange new introductions with
+contacts so they use the new route.
 
 For the strongest practical setup offered here, use four witnesses with a TOAD
 of three; this requires three witness receipts while allowing one witness to be
@@ -152,20 +157,24 @@ Replace the example origin with the configured service origin:
    export KF_DEV_ACCOUNT_URL=https://boot.example/account
 
 The optional ``ONBOARDING_DESTINATION`` and ``ACCOUNT_DESTINATION`` variables
-under the same prefix pin the service AID. Mailbox setup uses the verified boot
-AID saved with the account for management. Message transport uses the verified
-operator returned by allocation. Configure Boot's private provider connection
+under the same prefix pin the service AID. Without a pin, Locksmith learns the
+service AID from the first signed reply at the configured origin. Use HTTPS
+for hosted services. Mailbox setup uses the Boot AID saved with the account.
+Message transport uses the operator returned by allocation.
+Configure Boot's private provider connection
 with ``KF_BOOT_MBX_BOOT_URL`` and the provider's public origin with
 ``KF_MAILBOX_PUBLIC_URL``. The provider connection defaults to empty, so mailbox
 allocation is opt-in. Boot advertises ``bootstrap.mailbox_enabled`` from that
-configuration; Locksmith does not persist a separate capability setting. Use
-HTTPS for hosted services.
+configuration.
 
-Old allocations whose endpoint equals the Boot AID are queued for replacement
-on vault open. The old role is revoked only after the new operator is verified.
-This does not transfer old queued messages. Preserve and drain used queues before
-changing deployments, then exchange fresh introductions. Live standalone
-interoperation remains an acceptance gate.
+Before replacing a Boot mailbox, drain its queued messages. The new operator
+does not receive messages queued at the old one. On vault open, Locksmith
+replaces old allocations that use the Boot AID and revokes the old mailbox
+role after it verifies the new operator.
+
+Send existing contacts a new **Share introduction** file and ask them to
+import it. The file includes the signed revocation of the previous mailbox.
+The new operator's contact link advertises its own route only.
 
 ``/bootstrap/config`` remains plain JSON over the configured HTTP(S) surface.
 Authenticated onboarding and approved-account requests are posted as

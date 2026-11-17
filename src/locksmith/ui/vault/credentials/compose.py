@@ -167,10 +167,10 @@ class ComposePresentationDialog(LocksmithDialog):
             if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
                 raise ValueError('This vault is closed.')
             request = self.vault.hby.db.exns.get((self.request_said,))
-            if request is None or 'Offer' not in ipexing.responses(self.vault, request):
-                raise ValueError('This request has changed. Return to Activity to review it.')
-            if error := ipexing.expiry_error(self.vault, request):
+            if error := ipexing.exchange_error(self.vault, request):
                 raise ValueError(error)
+            if 'Offer' not in ipexing.responses(self.vault, request):
+                raise ValueError('This request has changed. Return to Activity to review it.')
             if self.vault.db.issuers.get((self.schema_said,)) != self.presenter:
                 raise ValueError('Enable issuance for this schema with your presenting identifier first.')
             hab = self.vault.hby.habByPre(self.presenter)

@@ -14,8 +14,8 @@ for the sending and receiving roles. The identifiers can be in separate wallets.
 Use a distinct storage base when running separate instances; changing
 ``LOCKSMITH_BASE`` does not move existing vault data.
 
-Add a contact through its OOBI or signed introduction file. Locksmith verifies
-and saves the delivery address. Local aliases are labels, not trust anchors.
+Add a contact through its OOBI or signed introduction file. Verify the contact's
+AID through your agreed channel. An introduction may contain only key history.
 Use **Identifiers → View → Copy contact link** or **Share introduction** to
 share your own identifier. You can share the introduction file before account or mailbox
 setup. The contact link and credential actions require a receiving address.
@@ -24,16 +24,19 @@ Messaging starts automatically for local individual identifiers when the KERI
 Foundation account offers mailboxes. No separate mailbox registration is needed.
 An account can still finish onboarding when its provider does not offer mailboxes.
 
-Temporary connection failures get three retries after the first attempt, with
-waits of 30, 60, and 120 seconds. Exhausted attempts remain paused after reopening.
-Open **Connection details → Retry connection** to resume receiving. Use
-**Retry sending** for a saved outgoing message. Neither action changes the
-credential or its approved disclosure. Invalid authorization and expired
-exchanges require correction instead of automatic retries.
+Locksmith reads credentials and forwarded witness receipts from authorized
+mailboxes. If a mailbox goes offline, the open vault retries after 30 seconds,
+then 60 seconds, then every 120 seconds. It resumes at the saved position.
+If the mailbox denies access, correct the receiving setup and choose
+**Connection details → Retry connection**. Use **Retry sending** for a saved
+outgoing message after its three automatic retries. Retrying preserves the
+credential and its approved disclosure. Invalid authorization and expired
+exchanges require correction.
 
-Connection details also shows technical addresses. For an old contact without a delivery address, refresh
-the contact or import its updated introduction. Witness routes alone do not
-provide credential delivery.
+If a contact lacks a delivery address, refresh the contact or import its updated
+introduction. For credential delivery, use a controller, agent, or mailbox
+route with an HTTP or HTTPS address. A TCP-only address cannot deliver the
+credential stream with this version of Keripy.
 
 Issue and send
 --------------
@@ -54,8 +57,9 @@ Issue and send
    Choose **Approve recovery** to collect their receipts with the witness code,
    or choose **Back** to leave them pending. To continue after a
    vault restart, open **Issued Credentials → Resume issuance** on the pending
-   credential. You can also reopen its original request. Review the saved values
-   and authenticate again.
+   credential. Review the saved values and authenticate again. If the original
+   request expired, this finishes issuance in your wallet. Start a new exchange
+   to send the credential.
 4. Choose Grant, or use the credential's Grant action later. Verify the recipient
    and expand Review data and terms to share. Send only the intended disclosure.
 5. In the recipient wallet, open Activity, review the received exchange and choose
@@ -70,6 +74,12 @@ An authenticated credential establishes the evidence recorded by the wallet.
 The relying application still needs to check its trust anchor, authority scope,
 credential status and the claim required for its purpose. Receiving an IAR does
 not by itself approve a proofer or complete registration; see :doc:`proofing`.
+
+For a SEDI Grant, review **Verified delegation links** before you choose
+**Add credential**. Each row names a delegation and shows its issuer and
+delegate. The wallet checks these links against its local evidence. Compare
+the Organizational Unit credential's issuer with the published State AID
+to establish trust in the root.
 
 Negotiate a disclosure
 ----------------------
@@ -89,6 +99,8 @@ credential. For a new credential, choose the issuer and credential type. To requ
 a presentation, choose the holder and the information you need, including any
 linked credential fields. Both use IPEX Apply. The presentation path does not
 create an issuance registry. These actions remain available when the inventory is empty.
+In a SEDI Bespoke request, choose **Age** under **Choose information** to
+open the Age fields. You can change the source type if needed.
 Choose a built-in schema directly in the request form. Sending the request saves
 the chosen schema, and any linked credential types, in the current vault;
 cancelling leaves the vault unchanged. The Schema tab
@@ -105,7 +117,15 @@ response. On a presentation request, **Select all requested** selects the
 requested fields on that credential. To add another field, open **Additional
 fields (not requested)** and select it individually. Fields in one indivisible
 block are shared together.
+For a new credential request without selected fields, the issuer can use
+**Select all** under **Available fields**. Choose linked fields separately.
 Required identity, credential links and terms remain visible.
+
+Update both wallets before starting a new exchange. This version opens an
+IPEX exchange with an ``xip`` message. Wallets that still use the earlier
+``exn`` opener cannot exchange new requests with this version.
+If Activity reports an older message format, start a new request or offer.
+You can reuse the existing credential and view its signed history in Activity.
 
 Activity moves expired exchanges to **History** on refresh. An interrupted
 acceptance stays in **In progress** so you can resume it. To clear another
@@ -132,16 +152,17 @@ Activity.
 Locksmith carries the registry SAID in the signed Apply body as ``a.preg``.
 This is a Locksmith application field, not a standard IPEX field. The issuer
 verifies the registry's anchor and requester control before it uses that SAID
-in the credential's issuee ``rd`` field. Both wallets need registry-service
+in the credential's ``a.rd`` field. Both wallets need registry-service
 configuration and the required identifier evidence. Offer confirms ``a.preg``
 without disclosing credential values. Acceptance rejects a credential that
 does not use the requested registry. Schemas without this supported attribute
-declaration keep the existing request flow. The locked protocol does not enforce
-presentation-registry declarations in aggregate blocks.
+declaration keep the existing request flow. The pinned Keripy version reads presentation
+registry declarations from the expanded ``a`` block only.
 
-Offer does not disclose the credential's values or terms. Its reference can
-identify the same credential across exchanges. Grant carries the selected
-values and authentication evidence. Later disclosures do not fill hidden fields
+Locksmith sends Offers by reference. The reference can identify the same
+credential across exchanges. An incoming IPEX Offer can include values or
+terms. Review them before choosing Agree. Grant carries the selected values
+and authentication evidence. Later disclosures do not fill hidden fields
 in earlier exchanges. Review the retained Grant to inspect exactly what that
 exchange shared, including supporting credentials.
 
@@ -194,10 +215,17 @@ one immutable Grant, obtains witness receipts, and waits for configured registry
 publication and status checks before queueing delivery. Closing the response
 view does not cancel an authorized submission.
 
-Native issuance exempts only the origin credential's presentation requirement
-when its issuer grants it to its issuee. A linked credential's presentation
-requirement still applies to that new Grant. Collecting a registry binding from
-another vault is not implemented; the wallet stops before sending that disclosure.
+Keripy checks presentation registry declarations on the origin credential and
+its disclosed links. A declaration applies when its issuee is a grantor in this
+exchange. When the origin issuer grants directly to the origin issuee, Keripy
+skips declarations for that recipient throughout the graph. Other grantors'
+declarations still apply.
+
+Before using the same registry for a different Grant, check the earlier Grant
+in **Activity**. Use **Retry sending** to deliver the original Grant again.
+The wallet releases the registry when it verifies the recipient's Admit or
+Spurn. Without a reply, it waits until both the exchange and the Grant's
+delivery window expire under its KRAM policy.
 
 Preparation is not automatically resumed after interruption or failure. Returned
 proofs are retained, but a crash during native staging can occur before the

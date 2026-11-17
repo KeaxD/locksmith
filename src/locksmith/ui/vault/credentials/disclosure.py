@@ -14,8 +14,8 @@ from locksmith.ui.vault.credentials.presentation import (
 )
 
 
-class OfferRegistryWait(QObject):
-    """Resume one approved Offer after its pending registry check completes."""
+class RegistryCheckWait(QObject):
+    """Resume an approved send after its pending registry check completes."""
 
     def __init__(self, dialog, form, send, failed, *, decline=None):
         super().__init__(dialog)
@@ -148,6 +148,8 @@ class DisclosureFields(QWidget):
                 else:
                     additional = name == 'Additional fields'
                     title = 'Additional fields (not requested)' if additional and requested is not None else name
+                    if additional and select_available and requested is not None:
+                        title = 'Available fields'
                     layout.addWidget(details_section(title, widget, expanded=additional and
                         (expand_additional or bool(selected - requested_paths))))
         if sad is None and self.checkboxes:

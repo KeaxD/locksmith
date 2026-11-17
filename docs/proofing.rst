@@ -49,7 +49,8 @@ them or synchronize remote KELs automatically.
    local for an imported session. Receive and accept the ordinary IAR through
    the existing credential flow, obtain the accepted citizen KEL and witness
    evidence, then enter its SAID and anchor sequence number and choose
-   **Check binding**. The received inventory must authenticate the issuer;
+   **Check receipt binding** in the citizen wallet or **Check binding** in an
+   independent verifier wallet. The received inventory must authenticate the issuer;
    the IAR schema, ``u``, ``a.i``, and issuer must match this session.
 
 Successful receipt binding records ``awaiting_authority``. An imported session

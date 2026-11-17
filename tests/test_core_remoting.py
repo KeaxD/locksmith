@@ -229,7 +229,7 @@ def test_purge_oobi_resolution_state_removes_retry_records():
     assert all(store.get(keys=(oobi,)) is None for store in stores.values())
 
 
-def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
+def test_watcher_introduction_sends_kel_and_add_reply(monkeypatch):
     parsed = []
     sent = []
     replies = []
@@ -251,17 +251,6 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
         def deliver(self):
             delivered.append(True)
             return []
-
-    class FakeDoDoer:
-        def __init__(self, *, doers):
-            self.doers = doers
-
-    class FakeDoist:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def do(self, *, doers, limit):
-            delivered.append((doers, limit))
 
     def fake_parse_one(*, ims):
         parsed.append(bytes(ims))
@@ -289,10 +278,8 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
     monkeypatch.setattr(remoting.forwarding, "StreamPoster", FakePoster)
     monkeypatch.setattr(remoting.serdering, "SerderKERI", FakeSerder)
     monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
-    monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
 
-    remoting.introduce_watcher_observed_aid(
+    remoting.watcher_introduction_doers(
         app,
         hab=hab,
         watcher_eid="WAT_1",
@@ -338,7 +325,7 @@ def test_introduce_watcher_observed_aid_sends_kel_and_add_reply(monkeypatch):
     assert delivered
 
 
-def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monkeypatch):
+def test_watcher_introduction_skips_role_add_when_already_allowed(monkeypatch):
     parsed = []
     sent = []
     replies = []
@@ -358,17 +345,6 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
 
         def deliver(self):
             return []
-
-    class FakeDoDoer:
-        def __init__(self, *, doers):
-            self.doers = doers
-
-    class FakeDoist:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def do(self, *, doers, limit):
-            _ = (doers, limit)
 
     def fake_parse_one(*, ims):
         parsed.append(bytes(ims))
@@ -398,10 +374,8 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
     monkeypatch.setattr(remoting.forwarding, "StreamPoster", FakePoster)
     monkeypatch.setattr(remoting.serdering, "SerderKERI", FakeSerder)
     monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
-    monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
 
-    remoting.introduce_watcher_observed_aid(
+    remoting.watcher_introduction_doers(
         app,
         hab=hab,
         watcher_eid="WAT_1",
@@ -440,66 +414,6 @@ def test_introduce_watcher_observed_aid_skips_role_add_when_already_allowed(monk
         (b"reply:/watcher/WAT_1/add", b""),
         (b"reply:/watcher/WAT_1/add", b""),
     ]
-
-
-def test_introduce_watcher_observed_aid_wraps_delivery_failures(monkeypatch):
-    class FakePoster:
-        def __init__(self, *, hby, hab, recp, topic):
-            _ = (hby, hab, recp, topic)
-
-        def send(self, *, serder, attachment):
-            _ = (serder, attachment)
-
-        def deliver(self):
-            return []
-
-    class FakeSerder:
-        def __init__(self, raw):
-            self.raw = bytes(raw)
-            self.size = len(self.raw)
-
-    class FakeDoDoer:
-        def __init__(self, *, doers):
-            self.doers = doers
-
-    class FakeDoist:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def do(self, *, doers, limit):
-            _ = (doers, limit)
-            raise RuntimeError("boom")
-
-    hab = SimpleNamespace(
-        pre="AID_ACCOUNT",
-        kever=SimpleNamespace(),
-        db=SimpleNamespace(
-            ends=_FakeStore(),
-            cloneDelegation=lambda _kever, *, gvrsn: [],
-            clonePreIter=lambda pre, *, gvrsn: [],
-        ),
-        psr=SimpleNamespace(parseOne=lambda ims: None),
-        reply=lambda *, route, data: f"reply:{route}".encode("utf-8"),
-    )
-    app = SimpleNamespace(vault=SimpleNamespace(hby=object()))
-
-    monkeypatch.setattr(remoting.forwarding, "StreamPoster", FakePoster)
-    monkeypatch.setattr(remoting.serdering, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting, "SerderKERI", FakeSerder)
-    monkeypatch.setattr(remoting.doing, "DoDoer", FakeDoDoer)
-    monkeypatch.setattr(remoting.doing, "Doist", FakeDoist)
-
-    with pytest.raises(
-        ValueError,
-        match="Failed introducing observed AID AID_ACCOUNT to watcher WAT_1: boom",
-    ):
-        remoting.introduce_watcher_observed_aid(
-            app,
-            hab=hab,
-            watcher_eid="WAT_1",
-            observed_aid="AID_ACCOUNT",
-            observed_oobis=["https://wit-1.example/oobi/AID_ACCOUNT/witness/WIT_1"],
-        )
 
 
 def test_resolve_oobi_blocking_uses_sync_doer_when_qtask_is_missing(monkeypatch):
@@ -618,7 +532,7 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         assert target.db.eans.get(keys=keys).qb64 == cut.qb64
         assert target.db.rpys.get(keys=(cut.qb64,)).raw == source.db.rpys.get(keys=(cut.qb64,)).raw
         with pytest.raises(ipexing.MissingRouteError):
-            ipexing._require_route(sender, hab.pre, reply=False)
+            ipexing._require_route(app.vault, sender, hab.pre, reply=False)
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is False
 
@@ -633,7 +547,7 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
         import_contact()
         assert target.db.ends.get(keys=keys).allowed is True
-        ipexing._require_route(sender, hab.pre, reply=False)
+        ipexing._require_route(app.vault, sender, hab.pre, reply=False)
 
 
 @pytest.mark.parametrize('status', [200, 403, 503])

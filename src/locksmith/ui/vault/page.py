@@ -90,7 +90,6 @@ class VaultPage(BasePage):
         self.register_page("identifiers", IdentifierListPage(self))
         self.register_page("remotes", RemoteIdentifierListPage(self))
         self.register_page("groups", GroupIdentifierListPage(self))
-        self.register_page("credentials", IssuedCredentialsListPage(self))
         self.register_page("settings", SettingsPage(self))
         self.register_page("issued_credentials", IssuedCredentialsListPage(self))
         self.register_page("received_credentials", ReceivedCredentialsListPage(self))
@@ -127,7 +126,7 @@ class VaultPage(BasePage):
             lambda: self._show_vault_page("groups")
         )
         self.nav_menu.credentials_clicked.connect(
-            lambda: self._show_vault_page("credentials")
+            lambda: self._show_vault_page("issued_credentials")
         )
         self.nav_menu.settings_clicked.connect(
             lambda: self._show_vault_page("settings")
@@ -294,13 +293,11 @@ class VaultPage(BasePage):
         # Update nav menu with vault name
         self.nav_menu.set_vault_name(self.vault_name)
 
-        # Update all sub-pages with vault name
+        # Select the landing page before the new vault binds its inventory views.
+        self._show_page("identifiers")
         for page in self._pages.values():
             if hasattr(page, "set_vault_name"):
                 page.set_vault_name(self.vault_name)
-
-        # Show Identifiers sub-page by default
-        self._show_page("identifiers")
 
     def on_hide(self):
         super().on_hide()

@@ -76,11 +76,7 @@ class KFMailboxService:
             )
             signed = account_hab.endorse(request, last=False, framed=True)
             response = await self._post(signed, destination)
-            reply = parse_cesr_http_reply(
-                SimpleNamespace(vault=self.vault), response, expected_kinds=("exn",),
-                expected_route=request.ked["r"], expected_sender=destination,
-                expected_request=request.said, expected_recipient=account.account_aid,
-            )
+            reply = parse_cesr_http_reply(hby, response, request)
             operation = reply.payload.get("operation")
             if operation:
                 mailbox = await self._wait_for_allocation(
@@ -123,11 +119,6 @@ class KFMailboxService:
                 eid=mailbox_eid, role=kering.Roles.mailbox,
                 version=kering.Vrsn_2_0, pvrsn=kering.Vrsn_2_0, gvrsn=kering.Vrsn_2_0,
             )
-            parsing.Parser(kvy=hby.kvy, rvy=hby.rvy, local=True,
-                           version=kering.Vrsn_2_0).parse(ims=bytearray(authorization))
-            end = hby.db.ends.get(keys=(recipient_aid, kering.Roles.mailbox, mailbox_eid))
-            if end is None or not end.allowed:
-                raise KFBootError("Mailbox authorization was not accepted")
             # Publish the recipient's signed role at the mailbox that serves its OOBI.
             for message in hby.db.cloneDelegation(recipient.kever, gvrsn=kering.Vrsn_2_0):
                 await self._post(message, mailbox_eid, url=url)
@@ -150,6 +141,12 @@ class KFMailboxService:
                 if (recipient_aid not in reader.kevers or published is None or not published.allowed
                         or published_location is None or published_location.url != url):
                     raise KFBootError("The mailbox introduction has no verified receiving address")
+            # Make the route available locally only after the operator serves it.
+            parsing.Parser(kvy=hby.kvy, rvy=hby.rvy, local=True,
+                           version=kering.Vrsn_2_0).parse(ims=bytearray(authorization))
+            end = hby.db.ends.get(keys=(recipient_aid, kering.Roles.mailbox, mailbox_eid))
+            if end is None or not end.allowed:
+                raise KFBootError("Mailbox authorization was not accepted")
             if record.eid and record.eid != mailbox_eid:
                 old_end = hby.db.ends.get(keys=(recipient_aid, kering.Roles.mailbox, record.eid))
                 if old_end is not None and old_end.allowed:
@@ -205,11 +202,7 @@ class KFMailboxService:
                 pvrsn=kering.Vrsn_2_0, gvrsn=kering.Vrsn_2_0, kind=kering.Kinds.json,
             )
             response = await self._post(account_hab.endorse(request, last=False, framed=True), destination)
-            reply = parse_cesr_http_reply(
-                SimpleNamespace(vault=self.vault), response, expected_kinds=("exn",),
-                expected_route=request.route, expected_sender=destination,
-                expected_request=request.said, expected_recipient=account_hab.pre,
-            )
+            reply = parse_cesr_http_reply(self.vault.hby, response, request)
             operation = reply.payload.get("operation", {})
 
     async def _post(self, message, destination, *, url=None):

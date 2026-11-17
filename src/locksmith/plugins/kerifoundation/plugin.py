@@ -16,9 +16,9 @@ from typing import Any
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QDialog
 from PySide6.QtCore import Qt, QEvent, QObject
-from keri import help
+from keri import help, kering
 
-from locksmith.core.messaging import RETRY_DELAYS
+from locksmith.core.messaging import RETRY_DELAYS, delivery_route, receiving_ready
 from locksmith.plugins.kerifoundation.core.identifiers import iter_local_identifier_choices
 from locksmith.plugins.base import AccountProviderPlugin, PluginBase, WitnessProviderPlugin
 from locksmith.plugins.kerifoundation.db.basing import (
@@ -166,8 +166,17 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         self._watcher_list.set_boot_client(self._boot_client)
         self._watcher_register.set_db(self._db)
         self._sync_boot_client_destination()
+        account = self._db.get_account()
+        if account and account.status == ACCOUNT_STATUS_ONBOARDED and account.boot_server_aid:
+            for key, record in self._db.mailboxes.getTopItemIter():
+                if (record.status == "active" and record.account_aid == account.account_aid
+                        and record.eid == account.boot_server_aid):
+                    # Keep the current authorization while the worker verifies the replacement.
+                    record.status, record.attempts, record.retry_at = "pending", 0, 0.0
+                    self._db.mailboxes.pin(key, record)
+        self._unpublished_mailboxes = self._previous_unpublished_mailboxes(vault)
         self._identifier_connection = vault.signals.doer_event.connect(self._on_identifier_event)
-        self._resume_mailboxes()
+        self._start_mailboxes()
         logger.info(f"KF plugin DB opened for vault '{vault.hby.name}'")
 
     def prepare_vault_deletion(self, vault: Any) -> None:
@@ -577,18 +586,67 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         if event_type == "identifier_created":
             self._start_mailboxes(requested_prefix=data.get("pre"))
 
-    def _resume_mailboxes(self):
-        self._start_mailboxes()
-
     def _queue_mailbox(self, prefix):
         self._start_mailboxes(requested_prefix=prefix, retry=True)
 
+    def _previous_unpublished_mailboxes(self, vault):
+        """Find allocated routes that an earlier wallet installed before publication."""
+        account = self._db.get_account()
+        if account is None:
+            return {}
+        candidates = {(pre, eid) for (pre,), record in self._db.mailboxes.getTopItemIter()
+                      if record.status != "active"
+                      for (_, _, eid), end in vault.hby.db.ends.getTopItemIter((pre, kering.Roles.mailbox))
+                      if end.allowed and eid != record.eid}
+        if not candidates:
+            return {}
+        unpublished = {}
+        for _, reply in vault.hby.db.exns.getTopItemIter():
+            if reply.pre != account.boot_server_aid or reply.sad.get("ri") != account.account_aid:
+                continue
+            attrs = reply.sad["a"]
+            if not isinstance(attrs, dict):
+                continue
+            if reply.route == "/account/mailboxes/create":
+                mailbox = attrs.get("mailbox")
+            elif reply.route == "/operations/status":
+                operation = attrs.get("operation")
+                if not isinstance(operation, dict) or operation.get("kind") != "mailbox_create":
+                    continue
+                result = operation.get("result")
+                mailbox = result.get("mailbox") if isinstance(result, dict) else None
+            else:
+                continue
+            if not isinstance(mailbox, dict) or mailbox.get("status") != "active":
+                continue
+            pre, eid = mailbox.get("recipient_aid"), mailbox.get("eid")
+            if isinstance(pre, str) and isinstance(eid, str) and (pre, eid) in candidates:
+                unpublished.setdefault(pre, set()).add(eid)
+        return unpublished
+
+    def unpublished_mailboxes(self, vault, pre):
+        if vault is not self._app.vault or self._db is None:
+            return set()
+        eids = self._unpublished_mailboxes.get(pre, set())
+        if eids and (record := self._db.mailboxes.get((pre,))):
+            # A successful OOBI readback pins the verified EID on the record.
+            return eids - {record.eid}
+        return eids
+
     def messaging_status(self, vault, pre):
-        if vault is self._app.vault and self._db is not None:
-            record = self._db.mailboxes.get((pre,))
-            if record is not None:
-                return record.status, record.error
-        return None
+        if vault is not self._app.vault or self._db is None:
+            return None
+        record = self._db.mailboxes.get((pre,))
+        if record is None:
+            return None
+        hab = vault.hby.habByPre(pre)
+        if record.status != "active" and hab is not None:
+            route = delivery_route(hab, pre)
+            if route is not None:
+                role, endpoints = route
+                if role != kering.Roles.mailbox or self.unpublished_mailboxes(vault, pre).isdisjoint(endpoints):
+                    return None
+        return record.status, record.error
 
     async def ensure_messaging(self, vault, pre, *, retry=False):
         if vault is not self._app.vault or not self._has_onboarded_account():
@@ -627,7 +685,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             record = self._db.mailboxes.get((prefix,))
             if record is None:
                 record = MailboxRecord(account_aid=account.account_aid)
-            elif record.status == "active":
+            elif record.status == "active" and (not retry or receiving_ready(self._app.vault, hab)):
                 continue
             if record.status == "pending" and record.attempts > len(RETRY_DELAYS):
                 record.status = "failed"
@@ -758,7 +816,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             f"account_lookup={self._describe_account_record(self._get_account_record())}"
         )
         self._navigate("kf_identifiers")
-        self._resume_mailboxes()
+        self._start_mailboxes()
         self._identifiers_page.on_show()
         self._set_active_nav(self._id_btn)
 

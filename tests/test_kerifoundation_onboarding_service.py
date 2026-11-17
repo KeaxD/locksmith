@@ -8,6 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from keri import kering
+from keri.app import habbing
+from keri.core.serdering import SerderKERI
 
 from locksmith.plugins.kerifoundation.db.basing import (
     ACCOUNT_STATUS_FAILED,
@@ -33,7 +35,6 @@ from locksmith.plugins.kerifoundation.onboarding.service import (
     ONBOARDING_AUTH_NAMESPACE,
     OnboardingStartReply,
     load_kf_surfaces,
-    parse_cesr_http_reply,
 )
 from locksmith.plugins.kerifoundation.witnesses.provision import HostedWitnessRegistrar
 
@@ -279,14 +280,6 @@ class FakeBootClient:
     async def cancel_onboarding_async(self, *args, vault=None, **kwargs):
         return self.cancel_onboarding(*args, **kwargs)
 
-    async def list_account_watchers_async(self, *args, vault=None, **kwargs):
-        return self.list_account_watchers(*args, **kwargs)
-
-    async def list_account_witnesses_async(self, *args, vault=None, **kwargs):
-        return self.list_account_witnesses(*args, **kwargs)
-
-    async def delete_account_async(self, *args, vault=None, **kwargs):
-        return self.delete_account(*args, **kwargs)
 
 class RetryThenSucceedBootClient(FakeBootClient):
     def __init__(self):
@@ -461,7 +454,7 @@ def _run(coro):
 def stub_rotation(service):
     calls = []
 
-    def fake_rotate(*, hab, registration, allocated_witness_eids, toad, rotate=True):
+    async def fake_rotate(*, hab, registration, allocated_witness_eids, toad, rotate=True):
         if rotate:
             hab.kever.wits = list(allocated_witness_eids)
             hab.kever.toader.num = toad
@@ -475,11 +468,7 @@ def stub_rotation(service):
             }
         )
 
-    async def fake_rotate_async(**kwargs):
-        return fake_rotate(**kwargs)
-
-    service._rotate_account_to_allocated_witnesses_blocking = fake_rotate
-    service._rotate_account_to_allocated_witnesses_async = fake_rotate_async
+    service._rotate_account_to_allocated_witnesses_async = fake_rotate
     return calls
 
 
@@ -620,12 +609,12 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
     )
 
     try:
-        service._rotate_account_to_allocated_witnesses_blocking(
+        asyncio.run(service._rotate_account_to_allocated_witnesses_async(
             hab=hab,
             registration=registration,
             allocated_witness_eids=["WIT_1"],
             toad=1,
-        )
+        ))
     finally:
         db.close()
 
@@ -1361,54 +1350,23 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
             self.kever.toader.num = toad
             self.kever.sn += 1
 
-    class FakeReceiptor:
-        def __init__(self, hby):
-            self.hby = hby
-            self.calls = []
-            self.doers = ["clienter", "witDo", "gitDo"]
-            self.removed = []
+    from hio.base import doing
 
-        def wind(self, tymth):
-            self.tymth = tymth
-
+    calls = []
+    class FakeReceiptor(doing.DoDoer):
         def receipt(self, pre, sn=None, auths=None):
-            self.calls.append((pre, sn, auths))
-            if False:
-                yield 0.0
+            calls.append((pre, sn, auths))
+            yield self.tock
 
-        def remove(self, doers):
-            self.removed.append(list(doers))
-            self.doers = [doer for doer in self.doers if doer not in doers]
-
-    fake_receiptor = FakeReceiptor(hby=object())
-
-    class FakeDoist:
-        def __init__(self, *args, **kwa):
-            pass
-
-        def do(self, doers=None, limit=None, tyme=None, temp=None):
-            _ = (limit, tyme, temp)
-            runner = doers[1]
-            gen = runner(tymth=lambda: 0.0, tock=0.0)
-            next(gen)
-            with pytest.raises(StopIteration):
-                next(gen)
-
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.LocksmithReceiptor",
-        lambda hby: fake_receiptor,
-    )
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.doing.doify",
-        lambda fn: fn,
-    )
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.doing.Doist",
-        FakeDoist,
-    )
-
+    monkeypatch.setattr("locksmith.plugins.kerifoundation.onboarding.service.LocksmithReceiptor",
+                        lambda hby: FakeReceiptor(doers=[]))
+    app = FakeApp()
+    scheduler = doing.Doist(tock=0.01)
+    scheduler.enter(doers=[])
+    app.vault.extend = scheduler.extend
+    app.vault.remove = scheduler.remove
     service = KFOnboardingService(
-        app=FakeApp(),
+        app=app,
         db=_make_db(tmp_path, "kf-onboarding-rotate"),
         boot_client=FakeBootClient(),
         witness_registrar=FakeWitnessRegistrar(),
@@ -1421,128 +1379,74 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
         ],
         batch_mode=True,
     )
+    async def rotate():
+        task = asyncio.create_task(service._rotate_account_to_allocated_witnesses_async(
+            hab=hab, registration=registration, allocated_witness_eids=["WIT_1", "WIT_2"], toad=2))
+        while not task.done():
+            scheduler.recur()
+            await asyncio.sleep(0.01)
+        await task
+
     try:
-        service._rotate_account_to_allocated_witnesses_blocking(
-            hab=hab,
-            registration=registration,
-            allocated_witness_eids=["WIT_1", "WIT_2"],
-            toad=2,
-        )
+        asyncio.run(asyncio.wait_for(rotate(), 1))
         assert hab.rotate_calls == [{"toad": 2, "cuts": [], "adds": ["WIT_1", "WIT_2"]}]
-        assert fake_receiptor.calls
-        assert fake_receiptor.calls[0][0] == "AID_ROTATE"
-        assert fake_receiptor.calls[0][1] == 1
-        assert set(fake_receiptor.calls[0][2].keys()) == {"WIT_1", "WIT_2"}
-        assert all("#" in value for value in fake_receiptor.calls[0][2].values())
-        assert fake_receiptor.removed == [["clienter", "witDo", "gitDo"]]
-        assert fake_receiptor.doers == []
+        assert calls[0][:2] == ("AID_ROTATE", 1)
+        assert set(calls[0][2]) == {"WIT_1", "WIT_2"}
+        assert all("#" in value for value in calls[0][2].values())
+        assert not scheduler.deeds
     finally:
         service._db.close()
 
 
-def test_parse_cesr_http_reply_rejects_non_reply_messages(monkeypatch):
-    class FakeParser:
-        def __init__(self, *args, **kwa):
-            pass
+@pytest.mark.parametrize(("inception", "version"), [
+    (kering.Vrsn_1_0, kering.Vrsn_1_0),
+    (kering.Vrsn_2_0, kering.Vrsn_2_0),
+    (kering.Vrsn_1_0, kering.Vrsn_2_0),
+])
+def test_boot_client_accepts_only_signed_replies_for_its_request(monkeypatch, inception, version):
+    route = "/onboarding/session/status"
+    with habbing.openHab(name="boot", temp=True, version=inception) as (_, boot), \
+            habbing.openHab(name="wallet", temp=True, version=kering.Vrsn_2_0) as (hby, principal):
+        boot.rotate(version=version, gvrsn=version)
+        replay = b"".join(boot.msgOwnEvent(sn=sn, gvrsn=version) for sn in range(boot.kever.sn + 1))
+        vault = SimpleNamespace(hby=hby, closed=False)
+        client = KFBootClient(SimpleNamespace(vault=vault), surfaces=KFSurfaceConfig(
+            onboarding_url="https://boot.example/onboarding", account_url="https://boot.example/account"))
+        payload = {"session_id": "saved-session"}
 
-        def parse(self, ims):
-            return None
+        def response(recipient=principal.pre, reply_route=route, attributes=payload):
+            signed = boot.exchange(route=reply_route, receiver=recipient, attributes=attributes,
+                                   version=version, pvrsn=version, gvrsn=version, kind=kering.Kinds.json)
+            return SimpleNamespace(content=replay + signed, headers={}), SerderKERI(raw=signed)
 
-    app = SimpleNamespace(
-        vault=SimpleNamespace(
-            hby=SimpleNamespace(
-                kvy=SimpleNamespace(processEscrows=lambda: None),
-                rvy=object(),
-                exc=object(),
-                kevers={"BOOT_SERVER_AID": object()},
-            )
-        )
-    )
+        args = dict(surface="onboarding", hab=principal, route=route, payload=payload)
+        wire, signed = response()
+        monkeypatch.setattr(client, "request_cesr", lambda **kwargs: wire)
+        assert asyncio.run(client.send_exn_async(**args)).said == signed.said
+        assert client.boot_server_aid == boot.pre
+        assert client.send_exn(**args).said == signed.said  # Valid replay against existing key history.
 
-    fake_serder = SimpleNamespace(
-        pre="BOOT_SERVER_AID",
-        ked={
-            "t": "exn",
-            "r": "/account/witnesses",
-            "a": {"witnesses": []},
-        },
-        said="SAID_1",
-    )
-    response = SimpleNamespace(content=b"{}", headers={})
+        # A previously verified body does not authenticate an unsigned HTTP response.
+        wire.content = signed.raw
+        with pytest.raises(KFBootError, match="authenticated"):
+            client.send_exn(**args)
+        wire, unseen = response()
+        wire.content = unseen.raw
+        with pytest.raises(KFBootError, match="authenticated"):
+            asyncio.run(client.send_exn_async(**args))
+        assert not hby.db.exns.get((unseen.said,))
 
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.parsing.Parser",
-        FakeParser,
-    )
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.message_version",
-        lambda ims: kering.Vrsn_1_0,
-    )
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.split_cesr_stream",
-        lambda ims: [fake_serder],
-    )
-
-    with pytest.raises(KFBootError, match="expected rpy"):
-        parse_cesr_http_reply(
-            app,
-            response,
-            expected_kinds=("rpy",),
-            expected_route="/account/witnesses",
-        )
-
-
-def test_parse_cesr_http_reply_rejects_sender_mismatch(monkeypatch):
-    class FakeParser:
-        def __init__(self, *args, **kwa):
-            pass
-
-        def parse(self, ims):
-            return None
-
-    app = SimpleNamespace(
-        vault=SimpleNamespace(
-            hby=SimpleNamespace(
-                kvy=SimpleNamespace(processEscrows=lambda: None),
-                rvy=object(),
-                exc=object(),
-                kevers={"BOOT_SERVER_AID": object(), "OTHER_BOOT_AID": object()},
-            )
-        )
-    )
-
-    fake_serder = SimpleNamespace(
-        pre="OTHER_BOOT_AID",
-        ked={
-            "t": "rpy",
-            "r": "/account/witnesses",
-            "a": {"witnesses": []},
-        },
-        said="SAID_2",
-    )
-    response = SimpleNamespace(content=b"{}", headers={})
-
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.parsing.Parser",
-        FakeParser,
-    )
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.message_version",
-        lambda ims: kering.Vrsn_1_0,
-    )
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.split_cesr_stream",
-        lambda ims: [fake_serder],
-    )
-
-    with pytest.raises(KFBootError, match="did not match expected boot service"):
-        parse_cesr_http_reply(
-            app,
-            response,
-            expected_kinds=("rpy",),
-            expected_route="/account/witnesses",
-            expected_sender="BOOT_SERVER_AID",
-        )
+        for wire, error in (
+            (response(recipient=boot.pre)[0], "requesting identifier"),
+            (response(reply_route="/onboarding/session/start")[0], "exchange route"),
+            (response(attributes={"session_id": "other-session"})[0], "session_id"),
+            (SimpleNamespace(content=replay, headers={}), "exchange route"),
+        ):
+            with pytest.raises(KFBootError, match=error):
+                asyncio.run(client.send_exn_async(**args))
+        wire, _ = response()
+        with pytest.raises(KFBootError, match="expected service"):
+            client.send_exn(**args, destination=principal.pre)
 
 
 def test_boot_client_syncs_canonical_account_keystate(monkeypatch):
@@ -1579,11 +1483,11 @@ def test_boot_client_syncs_canonical_account_keystate(monkeypatch):
     )
     calls = []
 
-    def fake_post_cesr(**kwa):
+    def fake_request_cesr(**kwa):
         calls.append(kwa)
         return None
 
-    monkeypatch.setattr(client, "_post_cesr", fake_post_cesr)
+    monkeypatch.setattr(client, "request_cesr", fake_request_cesr)
 
     client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
     client._ensure_surface_keystate(surface="account", hab=hab, destination="BOOT_SERVER_AID")
@@ -1618,7 +1522,6 @@ def test_boot_client_syncs_canonical_account_keystate(monkeypatch):
     ]
     assert all(call["url"] == "https://boot.example/account" for call in calls)
     assert all(call["destination"] == "BOOT_SERVER_AID" for call in calls)
-    assert all(call["require_reply"] is False for call in calls)
 
 
 def test_boot_client_post_cesr_surfaces_http_error_details(monkeypatch):
@@ -1647,11 +1550,10 @@ def test_boot_client_post_cesr_surfaces_http_error_details(monkeypatch):
     )
 
     with pytest.raises(KFBootError, match="Wrong account principal"):
-        client._post_cesr(
+        client.request_cesr(
             url="https://boot.example/account",
             body=b"{}",
             attachment=b"sig",
-            require_reply=False,
         )
 
 
@@ -1950,7 +1852,7 @@ def test_onboarding_close_during_first_start_preserves_owner_for_retry(tmp_path,
                 return None
 
             transport = SimpleNamespace(_app=app, request_cesr=request)
-            await KFBootClient._post_cesr_async(transport, vault=vault, require_reply=False)
+            await KFBootClient._post_cesr_async(transport, vault=vault)
             return self.start_onboarding(hab, **kwargs)
 
     boot_client = RecoveringStartClient()

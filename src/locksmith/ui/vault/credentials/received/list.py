@@ -17,7 +17,7 @@ from locksmith.ui.vault.credentials.presentation import credential_name, identif
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.toolkit.tables.components import SkewersMenuButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
-from locksmith.ui.vault.shared.base_list_page import BaseListPage
+from locksmith.ui.vault.credentials.inventory import CredentialInventoryPage
 from locksmith.ui.toolkit.widgets import LocksmithButton
 from locksmith.ui.vault.credentials.received.accept import AcceptCredentialDialog
 from locksmith.ui.vault.credentials.received.delete import DeleteReceivedCredentialDialog
@@ -29,13 +29,19 @@ if TYPE_CHECKING:
 logger = help.ogler.getLogger(__name__)
 
 
-class ReceivedCredentialsListPage(BaseListPage):
+class ReceivedCredentialsListPage(CredentialInventoryPage):
     """
     Received credentials list content page.
 
     This is a content-only page that displays within the VaultPage container.
     The VaultPage manages the navigation menu.
     """
+
+    inventory_events = {
+        ('Ipex', 'accepted'),
+        ('ReceiveCredentialDoer', 'credential_received'),
+        ('DeleteReceivedCredential', 'credential_deleted'),
+    }
 
     def __init__(self, parent: "VaultPage" = None):
         """
@@ -45,10 +51,6 @@ class ReceivedCredentialsListPage(BaseListPage):
             parent: Parent widget (VaultPage container)
         """
         super().__init__(parent)
-
-        self.vault_name = None
-        self.parent = parent
-        self.app = self.parent.app
 
         # Ensure widget fills parent
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -127,7 +129,7 @@ class ReceivedCredentialsListPage(BaseListPage):
         self.inventory.addItem('Held credentials', True)
         self.inventory.addItem('Verified presentations', False)
         self.inventory.currentIndexChanged.connect(
-            lambda *_: self._load_received_credentials_data(reset_page=True))
+            lambda *_: self._refresh_rows(reset_page=True))
         self.table.header.search_layout.addWidget(self.inventory)
         self.table.header.search_layout.addWidget(actions)
         self.setTabOrder(self.table.header.search_input.line_edit, self.inventory.combo_box)
@@ -137,7 +139,7 @@ class ReceivedCredentialsListPage(BaseListPage):
 
         logger.info("ReceivedCredentialsListPage initialized with table widget")
 
-    def _load_received_credentials_data(self, *, reset_page=False):
+    def _load_rows(self, *, reset_page=False):
         """
         Load received credentials data from the opened vault.
 
@@ -168,6 +170,7 @@ class ReceivedCredentialsListPage(BaseListPage):
                 }
                 received_credentials_data.append(cred_dict)
 
+            self._watch_signers(creds)
             self.table.set_static_data(received_credentials_data, reset_page=reset_page)
             logger.info(f"Loaded {len(received_credentials_data)} received credentials")
         except Exception as e:
@@ -215,53 +218,3 @@ class ReceivedCredentialsListPage(BaseListPage):
             logger.info(f"Export received credential: {credential_schema} (SAID: {credential_said})")
         else:
             logger.info(f"Action '{action}' not yet implemented")
-
-    def set_vault_name(self, vault_name: str):
-        """
-        Set the vault name for this page and load credentials data.
-
-        This is called by VaultPage.on_show() after a vault is opened,
-        ensuring that self.app.vault.hby is available.
-
-        Args:
-            vault_name: Name of the open vault
-        """
-        self.vault_name = vault_name
-
-        # Now that the vault is open and hby is available, load the data
-        if self.app.vault and self.app.vault.hby:
-            self._load_received_credentials_data(reset_page=True)
-
-            # Connect to vault signal bridge for automatic list updates
-            if hasattr(self.app.vault, 'signals'):
-                self.app.vault.signals.doer_event.connect(self._on_doer_event)
-                logger.info("ReceivedCredentialsListPage: Connected to vault signal bridge")
-        else:
-            logger.warning(f"Cannot load received credentials data - vault or hby not available")
-
-    def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
-        """
-        Handle doer events from the signal bridge.
-
-        Args:
-            doer_name: Name of the doer that emitted the event
-            event_type: Type of event
-            data: Event data dictionary
-        """
-        logger.debug(f"ReceivedCredentialsListPage received doer_event: {doer_name} - {event_type}")
-
-        if doer_name == 'RegistryEvidence' and event_type == 'status_checked':
-            self._load_received_credentials_data()
-
-        # Refresh list when a credential is received
-        if doer_name == "ReceiveCredentialDoer" and event_type == "credential_received":
-            logger.info(f"Credential received: {data.get('schema')}, refreshing list")
-            self._load_received_credentials_data()
-
-        # Refresh list when a credential is deleted
-        elif doer_name == "DeleteReceivedCredential" and event_type == "credential_deleted":
-            logger.info(f"Received credential deleted: {data.get('schema')}, refreshing list")
-            self._load_received_credentials_data()
-
-        elif doer_name == "Ipex" and event_type in ("accepted", "transport_submitted", "send_failed"):
-            self._load_received_credentials_data()

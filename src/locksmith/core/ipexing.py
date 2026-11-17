@@ -4,6 +4,8 @@ from collections import deque
 from collections.abc import Mapping
 from contextlib import closing
 from itertools import islice
+from time import monotonic
+import random
 import uuid
 
 from hio.base import doing
@@ -17,6 +19,7 @@ from keri.help import helping
 from keri.peer import exchanging
 
 from locksmith.core import credentialing
+from locksmith.core.messaging import delivery_route, receiving_ready
 from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.db.basing import AcceptedCredential, CredentialRequest, GrantReceipt, IpexSubmission, PresentationProof
 
@@ -83,32 +86,14 @@ def _edge_nodes(sad):
                           for label, node in group.items() if label not in labels)
 
 
-def _reachable(hab, pre):
-    """Return whether StreamPoster has a URL for the route it would choose for pre.
-
-    Pinned endsFor also returns revoked roles, and StreamPoster still selects
-    them. A revoked role therefore blocks delivery until it is repaired.
-    """
-    ends = hab.endsFor(pre)
-    role = next((role for role in (kering.Roles.controller, kering.Roles.agent, kering.Roles.mailbox)
-                 if role in ends), None)
-    if role is None:
-        return False
-    # StreamPoster reloads this role, so filtering our copy cannot prevent
-    # delivery to an inactive endpoint. Block the whole selected route.
-    for eid in ends.get(role, {}):
-        if (end := hab.db.ends.get((pre, role, eid))) and not (end.allowed or end.enabled):
-            return False
-    return any(urls.get(scheme) for urls in ends.get(role, {}).values()
-               for scheme in (kering.Schemes.http, kering.Schemes.https, kering.Schemes.tcp))
-
-
-def _require_route(hab, recipient, reply=True):
-    """Require routes for network delivery and any required reply."""
-    if not _reachable(hab, recipient):
-        raise MissingRouteError('No explicit delivery route is available. Import an introduction with an active mailbox, agent, or controller route.')
-    if reply and not _reachable(hab, hab.pre):
-        raise kering.ConfigurationError('This identifier cannot receive replies. Set up a mailbox through its account provider.')
+def _require_route(vault, hab, recipient, reply=True):
+    """Return the delivery route and check that the sender can receive a required reply."""
+    route = delivery_route(hab, recipient)
+    if route is None:
+        raise MissingRouteError('No explicit delivery route is available. Import an introduction with an HTTP or HTTPS mailbox, agent, or controller address.')
+    if reply and not receiving_ready(vault, hab):
+        raise kering.ConfigurationError('This identifier cannot receive replies. Open Connection details to check its HTTP or HTTPS address.')
+    return route
 
 
 def _require_vault(vault, hab=None):
@@ -120,6 +105,11 @@ def _require_vault(vault, hab=None):
 
 def _validate_outgoing_grant(vault, hab, grant):
     """Recheck retained proofs before a new or retried disclosure leaves the wallet."""
+    for (_, regk), proof in vault.db.presentations.getTopItemIter(keys=(grant.said,)):
+        # This wallet attached the opening for its binding update only.
+        head = vault.rgy.store.head(regk)
+        if head is None or head.qb64 != proof.update:
+            raise kering.ValidationError('The presentation registry binding changed. Start a new presentation.')
     for nest in exchanging.loadParsedNestedSubstreams(vault.hby, grant.said):
         credentialing.require_registry_evidence(vault, nest.serder, hab)
         state = credentialing.authentication(vault, nest)
@@ -138,8 +128,7 @@ def prepare(vault, hab, serder, attachment):
     if not serder.route.startswith('/ipex/'):
         raise ValueError('Expected an IPEX message')
     if not vault.exc.complete(serder.said):
-        prior = vault.hby.db.exns.get((serder.sad.get('p', ''),)) if serder.sad.get('p', '') else None
-        if error := expiry_error(vault, prior):
+        if error := exchange_error(vault, serder, sending=True):
             raise kering.ValidationError(error)
         vault.mbx.parser.parse(ims=bytearray(serder.raw + attachment), local=True,
                                version=kering.Vrsn_2_0)
@@ -153,7 +142,9 @@ def prepare(vault, hab, serder, attachment):
 def _presentation_requirements(sender, recipient, origin, nodes):
     """Resolve declarations for the sender and origin principal of a wallet Grant."""
     nodes = list(nodes)
-    root = next(node for node in nodes if node.said == origin)
+    root = next((node for node in nodes if node.said == origin), None)
+    if root is None:
+        raise ValueError('Grant origin evidence is missing')
     grantors = {sender, root.iseaid or root.israid}
     issuance = (sender, recipient) == (root.israid, root.iseaid)
     for acdc in nodes:
@@ -178,16 +169,45 @@ def presentation_registries(vault, sender, recipient, origin, nodes):
     return registries
 
 
+def _check_presentation_reuse(vault, said, registries):
+    """Keep a Grant verifiable until its recipient replies or its exchange expires."""
+    if next(vault.db.presentations.getTopItemIter(keys=(said,)), None):
+        raise ValueError('This presentation was already prepared; inspect its registry state before trying again')
+    heads = {head.qb64 for regk in registries if (head := vault.rgy.store.head(regk))}
+    handler = vault.exc.routes['/ipex/grant']
+    for (previous, _), proof in vault.db.presentations.getTopItemIter():
+        if proof.update not in heads:
+            continue
+        # A failed preparation can leave a TEL proof without a sendable Grant.
+        grant = vault.hby.db.exns.get((previous,))
+        if grant is None:
+            continue
+        if expiry_error(vault, grant):
+            # A Grant signed near exchange expiry can still arrive within KRAM's delivery lag.
+            policy = vault.hby.db.kramCTYP.get('~')
+            age = (helping.nowUTC() - helping.fromIso8601(grant.stamp)).total_seconds() * 1000
+            if age > policy.ll + policy.d:
+                continue
+        reply = handler.response(grant)
+        if reply is None or reply.route not in ('/ipex/admit', '/ipex/spurn'):
+            raise ValueError(f'Presentation registry is waiting for a reply to Grant {previous}. '
+                             'Check its delivery in Credentials → Activity.')
+
+
 def submit(vault, hab, serder, attachment, *, codes=None):
     """Retain a signed message and authorize its delivery by the vault worker."""
     _require_vault(vault, hab)
     if serder.pre != hab.pre or serder.pvrsn.major != 2:
         raise ValueError('IPEX must be signed by this vault')
-    if serder.route == '/ipex/grant' and not vault.exc.complete(serder.said):
+    if error := _legacy_opener_error(vault, serder, sending=True):
+        raise kering.ValidationError(error)
+    if serder.route == '/ipex/grant' and serder.sad['a'].get('o') and not vault.exc.complete(serder.said):
+        if error := expiry_error(vault, serder):
+            raise kering.ValidationError(error)
         parsed, = parsing.Parser().parse(ims=bytearray(serder.raw + attachment),
                                           processive=False, version=kering.Vrsn_2_0)
         registries = presentation_registries(vault, serder.pre, serder.sad['ri'],
-                                             serder.sad['a']['o'][0] if parsed.nests else None,
+                                             serder.sad['a']['o'][0],
                                              [nest.serder for nest in parsed.nests])
         if registries:
             for doer in vault.doers:
@@ -197,8 +217,7 @@ def submit(vault, hab, serder, attachment, *, codes=None):
                     return serder.said
                 if registries.keys() & doer.registries.keys():
                     raise ValueError('Another presentation is being prepared with this registry')
-            if list(vault.db.presentations.getTopItemIter(keys=(serder.said,))):
-                raise ValueError('This presentation was already prepared; inspect its registry state before trying again')
+            _check_presentation_reuse(vault, serder.said, registries)
             vault.extend([PresentIpexDoer(vault, hab, parsed, registries, codes=codes)])
             return serder.said
     prepare(vault, hab, serder, attachment)
@@ -213,6 +232,8 @@ def retry(vault, said):
     record = vault.db.outbox.get((said,))
     if record is None:
         raise ValueError('No saved submission to retry')
+    if error := exchange_error(vault, vault.hby.db.exns.get((said,)), sending=True):
+        raise kering.ValidationError(error)
     if record.status != 'sending':
         record.status, record.error, record.retry_at = 'pending', '', 0.0
         record.attempts = 0
@@ -221,17 +242,22 @@ def retry(vault, said):
         vault.signals.emit_doer_event('Ipex', 'queued', {'said': said})
 
 
-def grant_credential(vault, grant_said):
-    """Load the origin credential from a retained, verified grant."""
+def grant_evidence(vault, grant_said):
+    """Load the origin and disclosed nodes from the same verified Grant."""
     exn = vault.hby.db.exns.get(keys=(grant_said,))
     if exn is None or exn.route != '/ipex/grant' or exn.pvrsn.major != 2:
         raise kering.ValidationError('Verified native grant not found')
     exchanging.verify(vault.hby, exn)
     origin = exn.sad['a']['o'][0]
-    for nest in exchanging.loadParsedNestedSubstreams(vault.hby, grant_said):
+    nests = exchanging.loadParsedNestedSubstreams(vault.hby, grant_said)
+    for nest in nests:
         if nest.serder.said == origin:
-            return nest.serder
+            return nest.serder, nests
     raise kering.ValidationError('Grant origin evidence is missing')
+
+
+def grant_credential(vault, grant_said):
+    return grant_evidence(vault, grant_said)[0]
 
 
 def _disclosure_plan(origin, nodes):
@@ -349,6 +375,11 @@ def disclosure(vault, credential_said, *, plan, hab=None):
     Native IPEX validates the plan and authentication before submission.
     """
     view, artifacts, _, nodes = _credential_evidence(vault, credential_said, hab)
+    return _disclose_evidence(view, artifacts, nodes, plan)
+
+
+def _disclose_evidence(view, artifacts, nodes, plan):
+    credential_said = view['sad']['d']
     selected_nodes, streams, parsed = {}, {}, {}
     for stream in [view['proof'], *artifacts]:
         nest, = parsing.Parser().parse(ims=bytearray(stream), processive=False, version=kering.Vrsn_2_0)
@@ -422,7 +453,7 @@ class RequestCredentialDoer(doing.DoDoer):
 
     def __init__(self, vault, hab, recipient, schema, *, disclosure_plan=None, ax=None, codes=None):
         _require_vault(vault, hab)
-        _require_route(hab, recipient)
+        _require_route(vault, hab, recipient)
         schemer = vault.hby.db.schema.get((schema,))
         if schemer is None or not requests_presentation_registry(schemer.sed):
             raise ValueError('This credential type does not declare a presentation registry')
@@ -503,7 +534,7 @@ def start(vault, hab, recipient, action, message='', *, schema=None, credential_
     _require_vault(vault, hab)
     if not recipient or recipient == hab.pre:
         raise ValueError('Choose another identifier for this exchange')
-    _require_route(hab, recipient)
+    _require_route(vault, hab, recipient)
     if action == 'Apply':
         if not schema or vault.hby.db.schema.get((schema,)) is None:
             raise ValueError('Choose a loaded schema')
@@ -520,6 +551,21 @@ def start(vault, hab, recipient, action, message='', *, schema=None, credential_
     else:
         raise ValueError('Start with Apply or Offer')
     return submit(vault, hab, exn, atc)
+
+
+def _legacy_opener_error(vault, exn, *, sending=False):
+    # Keripy checks the immediate parent of an incoming reply. Later stages can
+    # continue if both peers already accepted the first reply before upgrading.
+    if sending and exn is not None and (prior := exn.sad.get('p')):
+        exn = vault.hby.db.exns.get((prior,))
+    if exn is not None and exn.ilk == kering.Ilks.exn and not exn.sad.get('p'):
+        return 'This exchange uses an older message format. Start a new exchange to continue.'
+    return None
+
+
+def exchange_error(vault, exn, *, sending=False):
+    """Explain why Keripy cannot continue or deliver this saved exchange."""
+    return _legacy_opener_error(vault, exn, sending=sending) or expiry_error(vault, exn)
 
 
 def expiry_error(vault, exn):
@@ -555,7 +601,7 @@ def responses(vault, exn):
     """Return decisions available to the local recipient of a saved message."""
     if (exn is None or exn.sad['ri'] not in vault.hby.prefixes
             or vault.hby.db.erpy.get((exn.said,)) is not None
-            or expiry_error(vault, exn)):
+            or exchange_error(vault, exn)):
         return []
     match exn.route:
         case '/ipex/apply':
@@ -580,7 +626,7 @@ def respond(vault, said, action, message='', credential_said=None, disclosure_pl
     """Validate the current decision before building and saving one response."""
     _require_vault(vault)
     prior = vault.hby.db.exns.get((said,))
-    if error := expiry_error(vault, prior):
+    if error := exchange_error(vault, prior):
         raise kering.ValidationError(error)
     if action not in responses(vault, prior):
         raise ValueError('This exchange has changed. Review its current status.')
@@ -593,9 +639,9 @@ def respond(vault, said, action, message='', credential_said=None, disclosure_pl
         if vault.db.receipts.get((hab.pre, said)).status == 'accepted':
             vault.signals.emit_doer_event('Ipex', 'accepted', {'said': exn.said})
         return exn.said
-    _require_route(hab, prior.pre, reply=action != 'Spurn')
+    _require_route(vault, hab, prior.pre, reply=action != 'Spurn')
     if action in ('Offer', 'Grant'):
-        view, artifacts, plan, _ = _credential_evidence(vault, credential_said, hab)
+        view, artifacts, plan, nodes = _credential_evidence(vault, credential_said, hab)
         issuance_request = _issuance_request(vault, prior)
         check_requested_registry(issuance_request, SerderACDC(sad=view['sad']))
         request = (vault.hby.db.exns.get((prior.sad.get('p', ''),))
@@ -625,7 +671,7 @@ def respond(vault, said, action, message='', credential_said=None, disclosure_pl
                                     if issuance_request and 'preg' in issuance_request.sad['a'] else None,
                                     kind=kering.Kinds.json)
         else:
-            proof, artifacts, _, nodes = disclosure(vault, credential_said, plan=requested, hab=hab)
+            proof, artifacts, _, nodes = _disclose_evidence(view, artifacts, nodes, requested)
             registries = presentation_registries(vault, hab.pre, prior.pre, credential_said,
                                                  [SerderACDC(sad=sad) for sad in nodes.values()])
             link = {'apply': prior} if prior.route == '/ipex/apply' else {'agree': prior}
@@ -642,56 +688,102 @@ def respond(vault, said, action, message='', credential_said=None, disclosure_pl
     return submit(vault, hab, exn, atc, codes=codes)
 
 
-def exchanges(vault):
-    """Read saved IPEX chains, with transport and acceptance records attached.
+def _history_keys(store):
+    """Read pages of keys without holding an LMDB transaction between yields."""
+    last = None
+    while True:
+        with store.db.env.begin() as txn, txn.cursor(store.sdb) as cursor:
+            if last is not None and not cursor.set_range(last + b'\0'):
+                return
+            keys = list(islice(cursor.iternext(values=False), 128))
+        if not keys:
+            return
+        for key in keys:
+            yield tuple(key.decode().split(store.sep))
+        last = keys[-1]
+
+
+def iter_exchanges(vault, *, root_said=None):
+    """Yield a saved exchange or None for each history record checked.
 
     The root fixes credential direction. Reply links fix stage; signed dates
     are display metadata and never select a winner.
     """
     _require_vault(vault)
-    messages = {exn.said: exn for _, exn in vault.hby.db.exns.getTopItemIter()
-                if exn.pvrsn.major == 2 and exn.route.startswith('/ipex/')
-                and {exn.pre, exn.sad['ri']} & vault.hby.prefixes}
-    submissions = {said: record for (said,), record in vault.db.outbox.getTopItemIter()}
-    receipts = list(vault.db.receipts.getTopItemIter())
-    result, visited = [], set()
-    for root in messages.values():
-        if root.sad.get('p', '') in messages:
+    db = vault.hby.db
+
+    def lookup(said):
+        exn = db.exns.get((said,))
+        if (exn is not None and exn.pvrsn.major == 2 and exn.route.startswith('/ipex/')
+                and {exn.pre, exn.sad['ri']} & vault.hby.prefixes):
+            return exn
+        return None
+
+    visited = set()
+    roots = ((root_said,),) if root_said is not None else _history_keys(db.exns)
+    for (said,) in roots:
+        if said in visited or (root := lookup(said)) is None:
+            yield None
+            continue
+        prior = root.sad.get('p', '')
+        if prior and lookup(prior) is not None:
+            if root_said is not None:
+                return
+            yield None
             continue
         chain, tip = [], root
-        problem = 'Earlier message is missing.' if root.sad.get('p', '') else ''
+        problem = 'Earlier message is missing.' if prior else ''
         while tip.said not in visited:
             visited.add(tip.said)
             chain.append(tip)
-            reply = vault.hby.db.erpy.get((tip.said,))
+            reply = db.erpy.get((tip.said,))
             if reply is None:
                 break
-            if reply.qb64 not in messages or reply.qb64 in visited:
+            child = lookup(reply.qb64)
+            if child is None or child.said in visited:
                 problem = 'Saved reply history is incomplete.'
                 break
-            tip = messages[reply.qb64]
+            tip = child
         sender, recipient = root.pre, root.sad['ri']
         if root.route == '/ipex/apply':
             sender, recipient = recipient, sender
-        saids = {exn.said for exn in chain}
+        submissions = {msg.said: record for msg in chain
+                       if (record := vault.db.outbox.get((msg.said,))) is not None}
+        receipts = []
+        for msg in chain:
+            if msg.route == '/ipex/grant':
+                keys = (msg.sad['ri'], msg.said)
+                if (record := vault.db.receipts.get(keys)) is not None:
+                    receipts.append((keys, record))
         expired = (expiry_error(vault, tip)
                    if not problem and tip.route not in ('/ipex/admit', '/ipex/spurn') else None)
-        problem = problem or expired or ''
-        result.append(dict(root=root.said, messages=chain, sender=sender, recipient=recipient,
-                           actions=responses(vault, tip) if not problem else [], problem=problem,
-                           expired=bool(expired),
-                           submissions={said: submissions[said] for said in saids if said in submissions},
-                           receipts=[(keys, record) for keys, record in receipts if keys[1] in saids]))
+        problem = problem or expired or _legacy_opener_error(vault, tip) or ''
+        yield dict(root=root.said, messages=chain, sender=sender, recipient=recipient,
+                   actions=responses(vault, tip) if not problem else [], problem=problem,
+                   expired=bool(expired), submissions=submissions, receipts=receipts)
+        if root_said is not None:
+            return
     # Keep damaged saved work reachable without inventing a protocol stage.
-    for said, record in submissions.items():
-        if said not in messages:
-            result.append(dict(root=said, messages=[], sender='', recipient='', actions=[],
-                               problem='Saved message is missing.', submissions={said: record}, receipts=[]))
-    for keys, record in receipts:
-        if keys[1] not in messages and record.status != 'accepted':
-            result.append(dict(root=keys[1], messages=[], sender='', recipient=keys[0], actions=[],
-                               problem='Original grant is missing.', submissions={}, receipts=[(keys, record)]))
-    return result
+    outbox_keys = ((root_said,),) if root_said is not None else _history_keys(vault.db.outbox)
+    for (said,) in outbox_keys:
+        if said not in visited and lookup(said) is None and (record := vault.db.outbox.get((said,))) is not None:
+            yield dict(root=said, messages=[], sender='', recipient='', actions=[],
+                       problem='Saved message is missing.', submissions={said: record}, receipts=[])
+        else:
+            yield None
+    for keys in _history_keys(vault.db.receipts):
+        said = keys[1]
+        if ((root_said is None or root_said == said) and said not in visited and lookup(said) is None
+                and (record := vault.db.receipts.get(keys)) is not None and record.status != 'accepted'):
+            yield dict(root=said, messages=[], sender='', recipient=keys[0], actions=[],
+                       problem='Original grant is missing.', submissions={}, receipts=[(keys, record)])
+        else:
+            yield None
+
+
+def exchanges(vault):
+    """Read saved IPEX chains with their transport and acceptance records."""
+    return [row for row in iter_exchanges(vault) if row is not None]
 
 
 def _validate_credential(vault, credential, grant_said):
@@ -771,8 +863,10 @@ def admit(vault, hab, grant_said, message='', *, send=False):
     if grant is None or grant.route != '/ipex/grant' or grant.sad['ri'] != hab.pre:
         raise kering.ValidationError('Grant is not addressed to the selected identifier')
     if send:
-        _require_route(hab, grant.pre, reply=False)
+        _require_route(vault, hab, grant.pre, reply=False)
     reply = vault.hby.db.erpy.get((grant_said,))
+    if not reply and (error := exchange_error(vault, grant)):
+        raise kering.ValidationError(error)
     if reply:
         saved = vault.hby.db.exns.get((reply.qb64,))
         if saved is None or saved.route != '/ipex/admit':
@@ -786,8 +880,6 @@ def admit(vault, hab, grant_said, message='', *, send=False):
             receipt = GrantReceipt(credential=credential.said, admit=accepted.admit,
                                    send=send, status='accepted')
             return _finish_receipt(vault, hab.pre, grant_said, receipt, restore=True)
-        if reply is None and (error := expiry_error(vault, grant)):
-            raise kering.ValidationError(error)
         if grant.sad['a'].get('ax', [False])[0] and vault.hby.db.erpy.get((grant_said,)) is None:
             if error := anchor_error(hab):
                 raise kering.ValidationError(error)
@@ -810,26 +902,53 @@ class IpexOutboxDoer(doing.DoDoer):
 
     ScanBatch = 256
     ScanDelay = 1.0
+    RecoverySeconds = 0.004
 
     def __init__(self, vault, **kwa):
         self.vault = vault
-        for keys, receipt in list(vault.db.receipts.getTopItemIter()):
-            try:
-                _finish_receipt(vault, *keys, receipt)
-            except Exception as ex:
-                receipt.error = str(ex)
-                if receipt.status != 'accepted':
-                    receipt.status = 'interrupted'
-                vault.db.receipts.pin(keys, receipt)
-        for keys, record in vault.db.outbox.getTopItemIter():
-            if record.status in ('sending', 'pending'):
-                record.status = 'pending' if record.attempts <= len(SendIpexDoer.RetryDelays) else 'failed'
-                vault.db.outbox.pin(keys, record)
+        self._recovery = self._recover()
+        # Finish small recoveries before the vault opens. Continue larger ones on its scheduler.
+        for _ in islice(self._recovery, 4):
+            pass
         super().__init__(doers=[doing.doify(self.sendDo)], **kwa)
+
+    def _recover(self):
+        vault = self.vault
+        for keys in _history_keys(vault.db.outbox):
+            record = vault.db.outbox.get(keys)
+            if record is not None and record.status in ('sending', 'pending'):
+                status = 'pending' if record.attempts <= len(SendIpexDoer.RetryDelays) else 'failed'
+                if status != record.status:
+                    record.status = status
+                    vault.db.outbox.pin(keys, record)
+                    vault.signals.emit_doer_event('Ipex', 'saved', {'said': keys[0]})
+            yield
+        for keys in _history_keys(vault.db.receipts):
+            receipt = vault.db.receipts.get(keys)
+            # Acceptance commits last. A later decision to send can survive a
+            # crash before its outbox entry is written.
+            if receipt is not None and (receipt.status != 'accepted' or receipt.error or not receipt.admit
+                    or (receipt.send and vault.db.outbox.get((receipt.admit,)) is None)):
+                previous = receipt.status
+                try:
+                    _finish_receipt(vault, *keys, receipt)
+                except Exception as ex:
+                    receipt.error = str(ex)
+                    if receipt.status != 'accepted':
+                        receipt.status = 'interrupted'
+                    vault.db.receipts.pin(keys, receipt)
+                event = 'accepted' if receipt.status == 'accepted' and previous != 'accepted' else 'saved'
+                vault.signals.emit_doer_event('Ipex', event, {'said': receipt.admit or keys[1]})
+            yield
 
     def sendDo(self, tymth=None, tock=0.0, **kwa):
         self.wind(tymth)
         yield self.tock
+        deadline = monotonic() + self.RecoverySeconds
+        for _ in self._recovery:
+            if monotonic() >= deadline:
+                yield self.tock
+                deadline = monotonic() + self.RecoverySeconds
         while not getattr(self.vault, 'closed', False):
             pending = []
             # Yield while scanning history, and close the read transaction
@@ -903,7 +1022,7 @@ class PresentIpexDoer(credentialing.CredentialUpdateDoer):
             if any((controller := self.vault.hby.habByPre(pre)) is None or controller.kever.lastEst.d != said
                    for pre, said in self.estates.items()):
                 raise ValueError('Identifier key state changed. Review the presentation and witness authentication again.')
-            _require_route(self.hab, self.serder.sad['ri'])
+            _require_route(self.vault, self.hab, self.serder.sad['ri'])
             registrar = Registrar(rgy=self.vault.rgy)
             receiptor = LocksmithReceiptor(hby=self.vault.hby)
             self.extend([receiptor])
@@ -935,12 +1054,12 @@ class PresentIpexDoer(credentialing.CredentialUpdateDoer):
                         nest.bsqs.append(proof)
                         nest.ssts.append(source)
             prior = self.vault.hby.db.exns.get((self.serder.sad.get('p', ''),)) if self.serder.sad.get('p', '') else None
-            if error := expiry_error(self.vault, prior):
+            if error := exchange_error(self.vault, prior):
                 raise kering.ValidationError(error)
             stream = exchanging.serializeParsedSubstream(self.parsed)
             self.vault.mbx.parser.parse(ims=bytearray(stream), local=True, version=kering.Vrsn_2_0)
-            # Native verification must accept the completed proof before delivery.
-            prepare(self.vault, self.hab, self.serder, b'')
+            if not self.vault.exc.complete(self.serder.said):
+                raise kering.ValidationError('Outgoing IPEX has not passed protocol verification')
             submit(self.vault, self.hab, self.serder, b'')
         except (OSError, kering.KeriError, ValueError) as ex:
             self.error = str(ex)
@@ -976,25 +1095,28 @@ class SendIpexDoer(credentialing.CredentialUpdateDoer):
             _require_vault(self.vault)
             record = self.vault.db.outbox.get((self.said,))
             if record is not None and not _due(record, helping.nowUTC().timestamp()):
-                return
+                record = None  # Local acceptance can still need witness receipts.
             self.serder = self.vault.hby.db.exns.get((self.said,))
             if self.serder is None:
                 raise kering.ValidationError('Saved submission has no retained message')
-            if error := expiry_error(self.vault, self.serder):
-                raise kering.ValidationError(error)
             self.hab = self.vault.hby.habByPre(self.serder.pre)
             if self.hab is None:
                 raise kering.ValidationError('Saved submission has no local sender')
-            if self.serder.route == '/ipex/grant' and self.serder.sad['a'].get('o'):
-                _validate_outgoing_grant(self.vault, self.hab, self.serder)
             if self.serder.route == '/ipex/admit':
                 consent = self.vault.db.receipts.get((self.hab.pre, self.serder.sad.get('p', '')))
-            if record is None and (consent is None or consent.status != 'preparing'):
+            preparing = consent is not None and consent.status == 'preparing'
+            if record is None and not preparing:
                 return
-            if record is not None:
+            # Finish an already signed acceptance even when its Admit cannot travel.
+            wire_error = exchange_error(self.vault, self.serder, sending=True) if record else None
+            if wire_error and not preparing:
+                raise kering.ValidationError(wire_error)
+            if record is not None and not wire_error:
+                if self.serder.route == '/ipex/grant' and self.serder.sad['a'].get('o'):
+                    _validate_outgoing_grant(self.vault, self.hab, self.serder)
                 if consent is not None and not consent.send:
                     raise kering.ValidationError('Network delivery was not authorized')
-                _require_route(self.hab, self.serder.sad['ri'],
+                _require_route(self.vault, self.hab, self.serder.sad['ri'],
                                reply=self.serder.route not in ('/ipex/admit', '/ipex/spurn'))
                 record.status, record.error = 'sending', ''
                 record.missing_route = False
@@ -1018,14 +1140,15 @@ class SendIpexDoer(credentialing.CredentialUpdateDoer):
                     self.vault.signals.emit_doer_event('Ipex', 'accepted', {'said': self.said})
             if record is None:
                 return
+            if error := exchange_error(self.vault, self.serder, sending=True):
+                raise kering.ValidationError(error)
             # Receipts may take several scheduler turns. Endpoint authority can
             # change during that wait; StreamPoster must never fall back to witnesses.
-            _require_route(self.hab, self.serder.sad['ri'],
-                           reply=self.serder.route not in ('/ipex/admit', '/ipex/spurn'))
-            stream = exchanging.serializeMessage(self.vault.hby, self.said)
+            role, endpoints = _require_route(self.vault, self.hab, self.serder.sad['ri'],
+                                             reply=self.serder.route not in ('/ipex/admit', '/ipex/spurn'))
             self.vault.signals.emit_doer_event('Ipex', 'sending', {'said': self.said})
             poster = forwarding.StreamPoster(hby=self.vault.hby, hab=self.hab,
-                                              recp=self.serder.sad['ri'], topic='credential')
+                                             recp=self.serder.sad['ri'], topic='credential')
             prefixes = []
             if self.serder.route == '/ipex/grant':
                 for nest in exchanging.loadParsedNestedSubstreams(self.vault.hby, self.serder.said):
@@ -1036,28 +1159,32 @@ class SendIpexDoer(credentialing.CredentialUpdateDoer):
                             and issuee in self.vault.hby.kevers):
                         prefixes.append(issuee)
             from locksmith.core.remoting import identifier_introduction
-            for message in self.vault.hby.db.cloneDelegation(self.hab.kever, gvrsn=kering.Vrsn_2_0):
-                event = SerderKERI(raw=message)
-                poster.send(event, attachment=message[event.size:])
-            introduction = bytearray(identifier_introduction(self.hab))
-            parser = parsing.Parser(version=kering.Vrsn_2_0)
-            while introduction:
-                original = bytes(introduction)
-                parsed = parser.parseOneBare(ims=introduction, processive=False)
-                consumed = len(original) - len(introduction)
-                poster.send(parsed.serder, attachment=original[parsed.serder.size:consumed])
+            stream = bytearray().join(self.vault.hby.db.cloneDelegation(self.hab.kever, gvrsn=kering.Vrsn_2_0))
+            stream.extend(identifier_introduction(self.hab, vault=self.vault))
             for pre in dict.fromkeys(prefixes):
                 if pre == self.hab.pre:
                     continue  # Its complete introduction was already sent above.
-                kever = self.vault.hby.kevers[pre]
-                for msg in self.vault.hby.db.cloneDelegation(kever, gvrsn=kering.Vrsn_2_0):
-                    event = SerderKERI(raw=msg)
-                    poster.send(serder=event, attachment=msg[event.size:])
-                for msg in self.vault.hby.db.clonePreIter(pre=pre, gvrsn=kering.Vrsn_2_0):
-                    event = SerderKERI(raw=msg)
-                    poster.send(serder=event, attachment=msg[event.size:])
-            poster.send(serder=self.serder, attachment=stream[self.serder.size:])
-            doers = poster.deliver()
+                stream.extend(self.hab.replay(pre=pre, gvrsn=kering.Vrsn_2_0))
+            stream.extend(exchanging.serializeMessage(self.vault.hby, self.said))
+            if role == kering.Roles.mailbox:
+                # The mailbox requires a signed /fwd envelope for each message.
+                frames = bytearray(stream)
+                parser = parsing.Parser(version=kering.Vrsn_2_0)
+                # The operator needs the signer's key history to verify the envelopes.
+                forwarded = self.hab.replay(gvrsn=kering.Vrsn_2_0)
+                offset = 0
+                while frames:
+                    serder = parser.parseOneBare(ims=frames, processive=False).serder
+                    end = len(stream) - len(frames)
+                    envelope, atc = poster.createForward(self.hab, endpoints, serder,
+                                                         stream[offset + serder.size:end], poster.topic)
+                    forwarded.extend(envelope.raw)
+                    forwarded.extend(atc)
+                    offset = end
+                mailbox = random.choice(list(endpoints))
+                endpoints = {mailbox: endpoints[mailbox]}
+                stream = forwarded
+            doers = poster.sendDirect(self.hab, endpoints, msg=stream)
             if not doers:
                 raise kering.ConfigurationError('No transport could submit this IPEX message')
             # Own recurrence here so child transport failures reach this retry

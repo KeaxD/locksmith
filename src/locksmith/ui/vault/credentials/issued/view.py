@@ -16,7 +16,7 @@ from keri import Vrsn_2_0
 from keri.core import Parser
 from locksmith.ui import colors
 from locksmith.core import credentialing
-from locksmith.ui.vault.credentials.presentation import attribute_view, credential_details, credential_name, identifier_name, date_label, status_label
+from locksmith.ui.vault.credentials.presentation import attribute_view, credential_details, credential_name, identifier_name, date_label, status_label, show_delegations
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
 from locksmith.ui.toolkit.widgets import (
@@ -116,11 +116,17 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
                                            identifier_name(self.app.vault, self.credential['recipient'])))
         self._build_status_section(layout)
         self._build_issued_date_section(layout)
+        nests = []
+        if (self.received or self.grant_said) and self.credential['sad'].get('e'):
+            streams = (self.credential['proof'], *self.credential['artifacts'].values())
+            parser = Parser()
+            nests = [nest for stream in streams
+                     for nest in parser.parse(ims=bytearray(stream), processive=False, version=Vrsn_2_0)]
+            show_delegations(layout, self.app.vault, self.credential_said, nests)
         layout.addWidget(credential_details(self.app.vault, self.credential['sad'], identity=False))
         if self.grant_said:
-            for stream in self.credential['artifacts'].values():
-                nodes = Parser().parse(ims=bytearray(stream), processive=False, version=Vrsn_2_0)
-                for node in nodes:
+            for node in nests:
+                if node.serder.said != self.credential_said:
                     layout.addWidget(credential_details(self.app.vault, node.serder.sad))
         verification = CollapsibleSection(title='Verification details')
         details = QVBoxLayout()

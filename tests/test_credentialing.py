@@ -448,9 +448,13 @@ def test_imported_disclosure_requires_sender_evidence_and_preserves_issuee(ipex_
 
 
 @pytest.mark.parametrize('authentication', ['anchor', 'signature'])
-def test_issuer_rotation_rechecks_new_acceptance_and_preserves_committed_receipts(ipex_vaults, authentication):
+def test_issuer_rotation_rechecks_new_acceptance_and_preserves_committed_receipts(ipex_vaults, authentication, qapp):
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QStackedWidget, QWidget
     from keri.core import parsing
     from keri.peer import exchanging
+    from locksmith.ui.vault.credentials.issued.list import IssuedCredentialsListPage
+    from locksmith.ui.vault.credentials.received.list import ReceivedCredentialsListPage
 
     sender, receiver = ipex_vaults('rotation-sender'), ipex_vaults('rotation-receiver')
     issuer, holder = sender.hby.makeHab(name='issuer'), receiver.hby.makeHab(name='holder')
@@ -471,8 +475,35 @@ def test_issuer_rotation_rechecks_new_acceptance_and_preserves_committed_receipt
         grants.append(grant)
     admit, _ = ipexing.admit(receiver.vault, holder, grants[0].said)
     original = exchanging.serializeMessage(receiver.hby, admit.said)
+    inventories = []
+    for app, page_type in ((sender, IssuedCredentialsListPage), (receiver, ReceivedCredentialsListPage)):
+        parent = QStackedWidget()
+        parent.app = app
+        parent.addWidget(QWidget())
+        page = page_type(parent)
+        parent.addWidget(page)
+        parent.show()
+        page.set_vault_name(app.name)
+        app.vault.signals.emit_doer_event('RegistrySync', 'registry_loaded', {'changed': True})
+        assert not page.table._static_data
+        parent.setCurrentWidget(page)
+        inventories.append(page)
+        assert 'Offer' in page.table._current_page_data[0]['_actions']
+    received = inventories[1]
+    received.parent.setCurrentIndex(0)
     issuer.rotate()
     _deliver_ipex(receiver.vault, issuer.replay(gvrsn=kering.Vrsn_2_0))
+    receiver.vault.signals.emit_doer_event('RegistrySync', 'registry_loaded', {'changed': True})
+    assert 'Offer' in received.table._current_page_data[0]['_actions']
+    received.parent.setCurrentWidget(received)
+    if authentication == 'signature':
+        assert 'Offer' not in received.table._current_page_data[0]['_actions']
+        deadline = monotonic() + 3
+        while 'Offer' in inventories[0].table._current_page_data[0]['_actions']:
+            assert monotonic() < deadline
+            QTest.qWait(20)
+    for page in inventories:
+        page.parent.close()
     sender.close_vault()
     receiver.close_vault()
     sender, receiver = ipex_vaults('rotation-sender'), ipex_vaults('rotation-receiver')
@@ -1229,6 +1260,7 @@ def test_accepted_credential_retains_admit_after_revocation(ipex_vaults, monkeyp
     assert credentialing.credential(receiver.vault, credential.said)['status']['et'] == 'unknown'
     restored, atc = ipexing.admit(receiver.vault, holder, grant.said)
     assert restored.raw + atc == retained
+    assert ipexing.prepare(receiver.vault, holder, restored, atc) == retained
     receipt = receiver.vault.db.receipts.get((holder.pre, grant.said))
     assert receipt.status == 'accepted' and receipt.admit == admit.said
     assert not ipexing.exchanges(receiver.vault)[0]['expired']

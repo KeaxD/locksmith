@@ -94,6 +94,10 @@ class PluginBase(ABC):
         """Return setup status and error for an identifier managed here."""
         return None
 
+    def unpublished_mailboxes(self, vault: Any, pre: str) -> set[str]:
+        """Return local mailbox authorizations still awaiting publication."""
+        return set()
+
     def get_witness_batches(self, vault: Any, hab_pre: str) -> Any | None:
         """Optional: return batch data for witness authentication grouping.
 

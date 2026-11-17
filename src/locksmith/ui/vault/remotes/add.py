@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButton
 from keri import help
 from keri.core.serdering import SerderKERI
 
+from locksmith.core.messaging import delivery_route
 from locksmith.core.remoting import ResolveOobiDoer, ImportDoer
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
@@ -376,10 +377,9 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
         """
         if data.get('pre') != self.prefix_field.text().strip():
             return
-        from locksmith.core.ipexing import _reachable
         hab = next(iter(self.app.vault.hby.habs.values()), None)
-        if hab is not None and not _reachable(hab, data['pre']):
-            self._on_failure('Contact saved, but no messaging address was supplied. Import an updated introduction.')
+        if hab is not None and delivery_route(hab, data['pre']) is None:
+            self._on_failure('Contact saved. Import an introduction with an HTTP or HTTPS messaging address.')
             return
         alias = data.get('alias', 'Unknown')
         logger.info(f"Successfully connected remote identifier: {alias}")

@@ -206,7 +206,7 @@ def test_offer_wait_continues_to_the_next_check_and_stops_on_a_repeat(qapp):
     form, failures = QWidget(dialog), []
     checks = [RegistryCheckPending('registry', operation, operation + ' pending')
               for operation in ('fetch', 'publish', 'fetch', 'fetch')]
-    wait = disclosure.OfferRegistryWait(dialog, form, lambda: wait.wait(checks.pop(0)), failures.append)
+    wait = disclosure.RegistryCheckWait(dialog, form, lambda: wait.wait(checks.pop(0)), failures.append)
 
     def complete():
         registry, operation = wait.pending

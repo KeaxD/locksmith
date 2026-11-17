@@ -1,5 +1,6 @@
 import importlib
 import logging
+import ssl
 from time import monotonic, sleep
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from keri.core import Codens, Counter, SerderKERI, coring, eventing, parsing
 from keri.db import dbing
 from keri.acdc import registraring
 
+from locksmith.core.messaging import delivery_route
 from locksmith.core.remoting import message_version
 from locksmith.core.ipexing import prepare
 from locksmith.db.basing import (
@@ -27,7 +29,6 @@ from locksmith.plugins.kerifoundation.db.basing import (
     ProvisionedWitnessRecord,
     WitnessRecord,
 )
-from locksmith.plugins.kerifoundation.onboarding import service as onboarding_service
 
 
 @pytest.mark.parametrize(
@@ -133,55 +134,6 @@ def test_kf_custom_komer_stores_round_trip_and_iterate(tmp_path):
         assert [row for _, row in provisioned_rows] == [provisioned]
     finally:
         db.close()
-
-
-def test_parse_cesr_http_reply_uses_detected_parser_version(monkeypatch):
-    parser_kwargs = []
-    version_inputs = []
-
-    class FakeParser:
-        def __init__(self, *args, **kwargs):
-            parser_kwargs.append(kwargs)
-
-        def parse(self, ims):
-            assert bytes(ims) == b"reply"
-
-    fake_serder = SimpleNamespace(
-        pre="BOOT_SERVER_AID",
-        ked={"t": "rpy", "r": "/account/witnesses", "a": {"witnesses": []}},
-        said="SAID_REPLY",
-    )
-    app = SimpleNamespace(
-        vault=SimpleNamespace(
-            hby=SimpleNamespace(
-                kvy=SimpleNamespace(processEscrows=lambda: None),
-                rvy=object(),
-                exc=object(),
-                kevers={"BOOT_SERVER_AID": object()},
-            )
-        )
-    )
-    response = SimpleNamespace(content=b"reply", headers={})
-
-    monkeypatch.setattr(onboarding_service.parsing, "Parser", FakeParser)
-    monkeypatch.setattr(
-        onboarding_service,
-        "message_version",
-        lambda ims: version_inputs.append(bytes(ims)) or kering.Vrsn_1_0,
-    )
-    monkeypatch.setattr(onboarding_service, "split_cesr_stream", lambda ims: [fake_serder])
-
-    reply = onboarding_service.parse_cesr_http_reply(
-        app,
-        response,
-        expected_kinds=("rpy",),
-        expected_route="/account/witnesses",
-        expected_sender="BOOT_SERVER_AID",
-    )
-
-    assert version_inputs == [b"reply"]
-    assert parser_kwargs[0]["version"] == kering.Vrsn_1_0
-    assert reply.sender == "BOOT_SERVER_AID"
 
 
 def test_message_version_detects_existing_keri10_event():
@@ -402,7 +354,8 @@ def test_locksmith_receiptor_uses_keri_v2_httping(monkeypatch):
     assert client.responded == 2
 
 
-def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
+@pytest.mark.parametrize('timeout', [False, True])
+def test_watcher_inquisitor_releases_transport_on_ack_or_timeout(monkeypatch, caplog, timeout):
     from locksmith.core import adjudication
 
     class FakeClient:
@@ -416,18 +369,10 @@ def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
             captured.update(target=target, src=src, route=route, query=query, **kwa)
             return b"qry"
 
-    class FakeHby:
-        db = SimpleNamespace()
-
-        def habByPre(self, src):
-            assert src == "SRC"
-            return FakeHab()
-
     captured = {}
     client = FakeClient()
     client_doer = object()
     inq = adjudication.WatcherInquisitor.__new__(adjudication.WatcherInquisitor)
-    inq.hby = FakeHby()
     inq.tock = 0.0
     inq.extend = lambda doers: captured.update(extended=doers)
     inq.remove = lambda doers: captured.update(removed=doers)
@@ -443,8 +388,18 @@ def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
         lambda **kwa: captured.update(stream=kwa),
     )
 
+    now = [0.]
+    monkeypatch.setattr(adjudication, 'monotonic', lambda: now[0])
     with caplog.at_level(logging.INFO):
-        list(inq.execute("TARGET", "SRC", "ksn", {"s": "0"}, "WATCHER"))
+        request = inq.execute(lambda: now[0], hab=FakeHab(), pre="TARGET", wit="WATCHER",
+                              route="ksn", query={"s": "0"})
+        next(request)
+        if timeout:
+            client.responses.clear()
+            next(request)
+            now[0] += adjudication.NETWORK_TIMEOUT
+        with pytest.raises(StopIteration):
+            next(request)
 
     assert captured["stream"]["client"] is client
     assert captured["stream"]["dest"] == "WATCHER"
@@ -453,7 +408,7 @@ def test_watcher_inquisitor_treats_204_as_accepted(monkeypatch, caplog):
     assert captured["gvrsn"] == kering.Vrsn_2_0
     assert captured["kind"] == kering.Kinds.json
     assert captured["removed"] == [client_doer]
-    assert "invalid response" not in caplog.text
+    assert "invalid response" not in caplog.text.lower()
 
 
 def test_remote_detail_lookup_preserves_organizer_metadata(monkeypatch):
@@ -915,11 +870,11 @@ def test_native_ipex_submission_retries_failed_delivery_across_reopen(
     retained = exchanging.serializeMessage(sender.hby, exn.said)
     now = helping.nowUTC()
     monkeypatch.setattr(helping, 'nowUTC', lambda: now)
-    def unavailable(self):
+    def unavailable(self, *args, **kwargs):
         raise TimeoutError('Mailbox unavailable')
 
     with monkeypatch.context() as patch:
-        patch.setattr(forwarding.StreamPoster, 'deliver', unavailable)
+        patch.setattr(forwarding.StreamPoster, 'sendDirect', unavailable)
         for attempt, delay in enumerate((30, 60, 120, 10), start=1):
             for _ in range(64):
                 sender.qtask.run()
@@ -953,6 +908,76 @@ def test_native_ipex_submission_retries_failed_delivery_across_reopen(
     assert sh.kever.sn == 0
 
 
+def test_mailbox_operator_and_recipient_cannot_learn_unpublished_role(ipex_vaults, ipex_mailbox, monkeypatch):
+    from keri.acdc import ipexing
+    from keri.app import forwarding
+
+    sender, receiver = ipex_vaults('filtered-sender'), ipex_vaults('filtered-recipient')
+    sh, rh = sender.hby.makeHab(name='sender'), receiver.hby.makeHab(name='recipient')
+    pending = sender.hby.makeHab(name='unpublished-mailbox')
+    role = sh.makeEndRole(eid=pending.pre, role=kering.Roles.mailbox)
+    _deliver_ipex(sender.vault, role)
+    assert sender.hby.db.ends.get((sh.pre, kering.Roles.mailbox, pending.pre)).allowed
+    sender.vault.plugin_manager = SimpleNamespace(
+        unpublished_mailboxes=lambda *_: {pending.pre}, messaging_status=lambda *_: None)
+
+    outer = []
+    messenger = forwarding.streamMessengerFrom
+    def capture(*args, msg, **kwargs):
+        outer.extend(frame.serder for frame in parsing.Parser(version=kering.Vrsn_2_0).parse(
+            ims=bytearray(msg), processive=False))
+        return messenger(*args, msg=msg, **kwargs)
+    monkeypatch.setattr(forwarding, 'streamMessengerFrom', capture)
+    exn, atc = ipexing.apply(sh, rh.pre, 'Apply', modifiers={'dp': [[]]})
+    inner = ipex_mailbox(sender, receiver, sh, exn, exn.raw + atc)
+    assert receiver.vault.exc.complete(exn.said)
+    unpublished = SerderKERI(raw=role).said
+    assert unpublished not in [serder.said for serder in inner]
+    assert outer[0].said == sh.iserder.said
+    assert unpublished not in [serder.said for serder in outer]
+    assert receiver.hby.db.ends.get((sh.pre, kering.Roles.mailbox, pending.pre)) is None
+
+
+@pytest.mark.real_routes
+@pytest.mark.parametrize('role', [kering.Roles.controller, kering.Roles.agent])
+def test_ipex_delivers_to_direct_peer_with_mailbox_role(ipex_vaults, monkeypatch, role):
+    from keri.acdc import ipexing as native
+    from keri.app import forwarding
+    from locksmith.core import ipexing
+
+    sender, receiver = ipex_vaults('direct-sender'), ipex_vaults('direct-receiver')
+    sh, rh = sender.hby.makeHab(name='sender'), receiver.hby.makeHab(name='receiver')
+    mailbox = receiver.hby.makeHab(name='mailbox')
+    tcp = receiver.hby.makeHab(name='tcp')
+    _deliver_ipex(sender.vault, sh.makeLocScheme(url='http://127.0.0.1:1')
+                  + sh.makeEndRole(eid=sh.pre, role=kering.Roles.controller))
+    _deliver_ipex(sender.vault, rh.replay() + tcp.replay()
+                  + tcp.makeLocScheme(url='tcp://127.0.0.1:4', scheme='tcp')
+                  + rh.makeEndRole(eid=tcp.pre, role=role))
+    with pytest.raises(ipexing.MissingRouteError, match='HTTP or HTTPS'):
+        ipexing._require_route(sender.vault, sh, rh.pre)
+    _deliver_ipex(sender.vault, mailbox.replay() + mailbox.makeLocScheme(url='http://127.0.0.1:3')
+                  + rh.makeEndRole(eid=mailbox.pre, role=kering.Roles.mailbox))
+    assert delivery_route(sh, rh.pre) == (kering.Roles.mailbox, {
+        mailbox.pre: {'http': 'http://127.0.0.1:3'}})
+    _deliver_ipex(sender.vault, rh.makeLocScheme(url='http://127.0.0.1:2')
+                  + rh.makeEndRole(eid=rh.pre, role=role))
+
+    def receive(hab, pre, urls, msg, **kwargs):
+        assert pre == rh.pre
+        _deliver_ipex(receiver.vault, msg)
+        return doing.DoDoer(doers=[])
+
+    monkeypatch.setattr(forwarding, 'streamMessengerFrom', receive)
+    exn, atc = native.apply(sh, rh.pre, 'Apply', modifiers={'dp': [[]]})
+    ipexing.submit(sender.vault, sh, exn, atc)
+    for _ in range(64):
+        sender.qtask.run()
+    assert sender.vault.db.outbox.get((exn.said,)).status == 'submitted'
+    assert receiver.vault.exc.complete(exn.said)
+    assert receiver.hby.db.ends.get((sh.pre, kering.Roles.controller, sh.pre)).allowed
+
+
 @pytest.mark.real_routes
 @pytest.mark.parametrize('role', [kering.Roles.controller, kering.Roles.agent,
                                   kering.Roles.mailbox])
@@ -973,10 +998,10 @@ def test_ipex_outbox_rechecks_revoked_route_before_send(ipex_vaults, monkeypatch
         sender.hby.psr.parse(ims=bytearray(active.makeLocScheme(url='http://127.0.0.1:2')))
         sender.hby.psr.parse(ims=bytearray(peer.makeEndRole(eid=active.pre, role=role)))
     deliveries = []
-    def unavailable(self):
-        deliveries.append((self.recp, self.hab.endsFor(self.recp)))
+    def unavailable(self, hab, ends, msg):
+        deliveries.append(ends)
         raise TimeoutError('Endpoint unavailable')
-    monkeypatch.setattr(forwarding.StreamPoster, 'deliver', unavailable)
+    monkeypatch.setattr(forwarding.StreamPoster, 'sendDirect', unavailable)
     exn, atc = native.apply(hab, peer.pre, 'Apply', modifiers={'dp': [[]]})
     ipexing.submit(sender.vault, hab, exn, atc)
     retained = exchanging.serializeMessage(sender.hby, exn.said)
@@ -988,8 +1013,7 @@ def test_ipex_outbox_rechecks_revoked_route_before_send(ipex_vaults, monkeypatch
     if mixed:
         assert record.status == 'failed' and record.attempts == 1
         assert not record.missing_route
-        assert deliveries == [(peer.pre, {
-            role: {active.pre: {'http': 'http://127.0.0.1:2'}}})]
+        assert deliveries == [{active.pre: {'http': 'http://127.0.0.1:2'}}]
     else:
         assert record.status == 'blocked' and record.attempts == 0
         assert record.missing_route
@@ -1005,7 +1029,11 @@ def test_ipex_outbox_rechecks_revoked_route_before_send(ipex_vaults, monkeypatch
     expected = {peer.pre: {'http': 'http://127.0.0.1:1'}}
     if mixed:
         expected[active.pre] = {'http': 'http://127.0.0.1:2'}
-    assert deliveries[-1] == (peer.pre, {role: expected})
+    if role == kering.Roles.mailbox:
+        [(eid, urls)] = deliveries[-1].items()
+        assert urls == expected[eid]
+    else:
+        assert deliveries[-1] == expected
     assert len(deliveries) == (2 if mixed else 1)
     assert exchanging.serializeMessage(sender.hby, exn.said) == retained
 
@@ -1046,9 +1074,9 @@ def test_ipex_outbox_yields_during_history_scan(ipex_vaults, monkeypatch):
             progress.append(len(scanned))
             yield tock
     sender.vault.extend([doing.doify(sibling)])
-    def unavailable(self):
+    def unavailable(self, *args, **kwargs):
         raise TimeoutError('Mailbox unavailable')
-    monkeypatch.setattr(forwarding.StreamPoster, 'deliver', unavailable)
+    monkeypatch.setattr(forwarding.StreamPoster, 'sendDirect', unavailable)
     sender.vault.signals.doer_event.connect(lambda *event: events.append(event))
     # A sibling must run after scanning starts and before all records are read.
     # A scan performed in one turn cannot expose an intermediate record count.
@@ -1086,12 +1114,12 @@ def test_ipex_never_falls_back_to_witness_after_receipt_wait(ipex_vaults, monkey
     for hab in (sender, witness, peer):
         app.hby.psr.parse(ims=bytearray(hab.makeLocScheme(url='http://127.0.0.1:1')))
     app.hby.psr.parse(ims=bytearray(sender.makeEndRole(eid=sender.pre, role=kering.Roles.mailbox)))
-    assert not ipexing._reachable(sender, peer.pre)
+    assert delivery_route(sender, peer.pre) is None
     app.hby.psr.parse(ims=bytearray(peer.makeEndRole(eid=peer.pre, role=kering.Roles.mailbox)))
     exn, atc = native.apply(sender, peer.pre, 'Apply', modifiers={'dp': [[]]})
     ipexing.submit(app.vault, sender, exn, atc)
     deliveries = []
-    monkeypatch.setattr(forwarding.StreamPoster, 'deliver', lambda self: deliveries.append(self.recp))
+    monkeypatch.setattr(forwarding.StreamPoster, 'sendDirect', lambda self, *a, **kw: deliveries.append(self.recp))
     monkeypatch.setattr(ipexing, '_pending_anchors', lambda *_: [(sender, sender.kever.serder)])
 
     def receipt(self, *args):
@@ -1329,6 +1357,52 @@ def test_native_ipex_cannot_fall_back_to_legacy_validation(ipex_vaults):
     assert receiver.vault.notifier.getNoteCnt() == 0
 
 
+@pytest.mark.parametrize('verb', ['apply', 'grant'])
+def test_saved_pre_xip_exchange_requires_restart(ipex_vaults, verb):
+    from locksmith.core import ipexing
+    from locksmith.db.basing import IpexSubmission
+
+    app = ipex_vaults('pre-xip')
+    sender, recipient = (app.hby.makeHab(name=name) for name in ('sender', 'recipient'))
+    xid = coring.Diger(ser=b'pre-XIP transaction').qb64
+
+    def saved(hab, peer, route, prior=''):
+        exn = eventing.exchange(sender=hab.pre, receiver=peer.pre, xid=xid, prior=prior,
+                                route='/ipex/' + route, modifiers={'dp': [[]]},
+                                attributes={'m': '', 'ax': [True]}, pvrsn=kering.Vrsn_2_0, kind=kering.Kinds.json)
+        app.hby.db.exns.pin((exn.said,), exn)
+        app.vault.db.outbox.put((exn.said,), IpexSubmission())
+        return exn
+
+    # Earlier Keripy stored both openers and replies as EXNs.
+    opener = saved(sender, recipient, verb)
+    tip = recipient.kever.serder.said
+    row, = ipexing.exchanges(app.vault)
+    assert row['messages'][0].raw == opener.raw
+    assert row['actions'] == [] and 'Start a new exchange' in row['problem']
+    with pytest.raises(kering.ValidationError, match='older message format'):
+        if verb == 'grant':
+            ipexing.admit(app.vault, recipient, opener.said)
+        else:
+            ipexing.respond(app.vault, opener.said, 'Spurn')
+    assert recipient.kever.serder.said == tip
+    assert app.vault.db.receipts.get((recipient.pre, opener.said)) is None
+    assert app.hby.db.erpy.get((opener.said,)) is None
+
+    first_reply = saved(recipient, sender, 'spurn', prior=opener.said)
+    app.close_vault()
+    app = ipex_vaults('pre-xip')
+    for exn in (opener, first_reply):
+        worker = ipexing.SendIpexDoer(app.vault, exn.said)
+        doing.Doist(doers=[worker], limit=1).do()
+        record = app.vault.db.outbox.get((exn.said,))
+        assert record.status == 'blocked' and record.attempts == 0
+        assert 'Start a new exchange' in record.error
+        with pytest.raises(kering.ValidationError, match='older message format'):
+            ipexing.retry(app.vault, exn.said)
+        assert app.hby.db.exns.get((exn.said,)).raw == exn.raw
+
+
 def test_ipex_close_stops_inflight_delivery_and_reopen_resumes(
         ipex_vaults, ipex_mailbox, monkeypatch):
     from hio.core.http import clienting
@@ -1378,7 +1452,7 @@ def test_ipex_outbox_is_scoped_to_vault_base(ipex_vaults):
     first, second = ipex_vaults('same-name', base='first'), ipex_vaults('same-name', base='second')
     one, two = first.hby.makeHab(name='sender'), second.hby.makeHab(name='sender')
     recipient = first.hby.makeHab(name='recipient')
-    exn, atc = native.apply(one, recipient.pre, 'Send', modifiers={'dp': [[]]})
+    exn, atc = native.grant(one, recipient.pre, 'Grant without a credential')
     assert first.vault.db.path != second.vault.db.path
     with pytest.raises(ValueError, match='does not belong'):
         ipexing.submit(second.vault, one, exn, atc)
@@ -1438,6 +1512,15 @@ def test_vault_listens_through_receiving_endpoints_and_replays_unparsed_mail(
     from keri.db import openLMDB
 
     if finite_batches:
+        # This operator closes the socket after its introduction response.
+        service_reps = http.Server.serviceReps
+        def close_after_intro(server):
+            for address, response in server.reps.items():
+                if server.reqs[address].method == 'PUT' and response.headers.get('connection') == 'close':
+                    server.reqs[address].persisted = False
+            service_reps(server)
+        monkeypatch.setattr(http.Server, 'serviceReps', close_after_intro)
+
         def read_batch(endpoint, req, rep):
             query = parseCesrHttpRequest(req).payload['q']
             data = bytearray(b'retry: 5000\n\n')
@@ -1454,7 +1537,7 @@ def test_vault_listens_through_receiving_endpoints_and_replays_unparsed_mail(
     with habbing.openHab(name='listen-mailbox', transferable=False, temp=True,
                          version=kering.Vrsn_2_0) as (mhby, mailbox), \
             habbing.openHab(name='listen-sender', temp=True,
-                            version=kering.Vrsn_2_0) as (_, sender), \
+                            version=kering.Vrsn_2_0) as (shby, sender), \
             openLMDB(cls=storing.Mailboxer, name='listen-mailbox') as mbx:
         mdoist = doing.Doist(doers=kerindirecting.setupWitness(
             mhby, alias='listen-mailbox', mbx=mbx, tcpPort=None, httpPort=port,
@@ -1505,9 +1588,17 @@ def test_vault_listens_through_receiving_endpoints_and_replays_unparsed_mail(
             rotation = SerderKERI(raw=bytes(sender.rotate()))
             mbx.storeMsg(topic=f'{rh.pre}/credential',
                          msg=bytearray(sender.replay(gvrsn=kering.Vrsn_2_0)))
+            replayed = shby.makeHab(name='replayed')
+            url = 'https://replayed.example'
+            mbx.storeMsg(topic=f'{rh.pre}/replay', msg=replayed.replay(gvrsn=kering.Vrsn_2_0))
+            mbx.storeMsg(topic=f'{rh.pre}/reply', msg=replayed.makeLocScheme(url=url, scheme='https'))
             run(receiver, lambda: sender.pre in receiver.hby.kevers
-                and receiver.hby.kevers[sender.pre].serder.said == rotation.said)
-            assert receiver.hby.db.tops.get((rh.pre, mailbox.pre)).topics['/credential'] == 1
+                and receiver.hby.kevers[sender.pre].serder.said == rotation.said
+                and replayed.pre in receiver.hby.kevers
+                and rh.fetchUrls(eid=replayed.pre, scheme='https').get('https') == url)
+            cursors = receiver.hby.db.tops.get((rh.pre, mailbox.pre)).topics
+            assert cursors['/credential'] == 1
+            assert cursors['/replay'] == cursors['/reply'] == 0
             if finite_batches:
                 run(receiver, lambda: pollers(receiver, rh.pre)[0].retry == 5000)
             # The mailbox is not this recipient's witness. A new read must
@@ -1607,7 +1698,9 @@ def test_mailbox_uses_persisted_sender_state_without_repeated_introduction(ipex_
     assert receiver.vault.exc.complete(exn.said)
 
 
-def test_mailbox_http_child_failure_closes_and_yields_to_other_work(ipex_vaults):
+@pytest.mark.parametrize('failure,paused', [(OSError('HTTP socket disconnected'), False),
+                                           (ssl.SSLCertVerificationError('Invalid certificate'), True)])
+def test_mailbox_http_child_failure_closes_and_yields_to_other_work(ipex_vaults, failure, paused):
     from locksmith.core.indirecting import Poller
 
     app = ipex_vaults('poller-failure')
@@ -1618,7 +1711,7 @@ def test_mailbox_http_child_failure_closes_and_yields_to_other_work(ipex_vaults)
     def disconnected(tymth, tock=0, **kwa):
         try:
             yield tock
-            raise OSError('HTTP socket disconnected')
+            raise failure
         finally:
             closed.append(True)
 
@@ -1633,43 +1726,89 @@ def test_mailbox_http_child_failure_closes_and_yields_to_other_work(ipex_vaults)
     try:
         for _ in range(8):
             doist.recur()
-        assert poller.done and poller.error == 'HTTP socket disconnected'
-        assert poller.retry_at > monotonic()
+        assert poller.done and poller.error == str(failure) and poller.state.paused == paused
+        assert (poller.retry_at > 0) == (not paused)
         assert closed == [True] and len(progress) > 2
     finally:
         doist.exit()
 
 
-def test_mailbox_retry_budget_survives_reopen(ipex_vaults, monkeypatch):
+def test_mailbox_retries_outages_after_upgrade_and_reopen(ipex_vaults, monkeypatch):
     from locksmith.core import indirecting
     from locksmith.db.basing import ConnectionRecord
 
     app = ipex_vaults('poller-budget')
     hab = app.hby.makeHab(name='recipient')
     pre = hab.pre
-    monkeypatch.setattr(indirecting, 'RETRY_DELAYS', (0.0, 0.0, 0.0))
+    key = (pre, pre)
+    now = 1000.0
+    monkeypatch.setattr(indirecting.time, 'time', lambda: now)
+    # An older wallet paused this route after four failures, with a retry timestamp.
+    app.vault.db.connections.pin(key, ConnectionRecord(attempts=4, paused=True, retry_at=900, error='offline'))
     calls = []
     def unavailable(*args):
         calls.append(True)
         raise OSError('mailbox unavailable')
     monkeypatch.setattr(indirecting.agenting, 'httpClient', unavailable)
-    # Reconstruct the real poller on each connection failure, just like the director.
-    for _ in range(6):
+    for count, delay in enumerate((30, 60, 120, 120, 120), start=1):
         poller = indirecting.Poller(hab, pre, ['/credential'], db=app.vault.db)
         doing.Doist(tock=0.03125, limit=0.5).do(doers=[poller])
-    state = app.vault.db.connections.get((pre, pre))
-    assert state.paused and state.attempts == 4 and len(calls) == 4
+        state = app.vault.db.connections.get(key)
+        assert not state.paused and state.attempts == len(calls) == count
+        assert state.retry_at == now + delay
+        now += delay
     app.close_vault()
     app = ipex_vaults('poller-budget')
     hab = app.hby.habByPre(pre)
     poller = indirecting.Poller(hab, pre, ['/credential'], db=app.vault.db)
     doing.Doist(tock=0.03125, limit=0.5).do(doers=[poller])
-    assert len(calls) == 4
+    assert len(calls) == 6
     app.vault.mbx.retry_receiving(pre)
     assert app.vault.db.connections.get((pre, pre)) == ConnectionRecord()
     poller = indirecting.Poller(hab, pre, ['/credential'], db=app.vault.db)
     doing.Doist(tock=0.03125, limit=0.5).do(doers=[poller])
-    assert len(calls) == 5
+    assert len(calls) == 7
+
+
+def test_closing_a_pending_mailbox_read_does_not_count_as_failure(ipex_vaults, monkeypatch):
+    from locksmith.core import indirecting
+
+    app = ipex_vaults('poller-close')
+    hab = app.hby.makeHab(name='recipient')
+    pending = []
+    def connect(*args):
+        client = SimpleNamespace(requests=[], request=lambda **kw: pending.append(kw), responses=[])
+        return client, doing.Doer()
+    monkeypatch.setattr(indirecting.agenting, 'httpClient', connect)
+    for _ in range(5):
+        poller = indirecting.Poller(hab, hab.pre, ['/credential'], db=app.vault.db)
+        doing.Doist(tock=0.03125, limit=0.5).do(doers=[poller])
+    assert len(pending) == 5
+    assert app.vault.db.connections.get((hab.pre, hab.pre)) is None
+
+
+@pytest.mark.real_routes
+def test_retry_connection_resumes_witness_only_reads(ipex_vaults, qapp):
+    import asyncio
+    from locksmith.db.basing import ConnectionRecord
+    from locksmith.ui.vault.identifiers.view import ViewIdentifierDialog
+
+    app = ipex_vaults('retry-witness')
+    witness = app.hby.makeHab(name='witness', transferable=False)
+    hab = app.hby.makeHab(name='recipient', wits=[witness.pre], toad=1)
+    key = (hab.pre, witness.pre)
+    app.vault.db.connections.pin(key, ConnectionRecord(error='Mailbox read failed (403)', paused=True))
+    dialog = ViewIdentifierDialog('', app, hab.name)
+    assert 'Polling paused' in dialog.connection_details.text()
+
+    async def retry():
+        dialog.retry_connection.click()
+        await dialog._connection_task
+
+    asyncio.run(retry())
+    assert app.vault.db.connections.get(key) == ConnectionRecord()
+    assert 'Polling paused' not in dialog.connection_details.text()
+    dialog.reject()
 
 
 @pytest.mark.real_routes
@@ -1686,7 +1825,7 @@ def test_mailbox_migration_preserves_control_topics_and_drain_deadline(ipex_vaul
     app.hby.psr.parse(ims=bytearray(recipient.makeEndRole(eid=mailbox.pre, role=kering.Roles.mailbox)))
     assert app.hby.db.tops.get((recipient.pre, witness.pre)) is None
     topics = app.vault.mbx.receiving_topics(recipient)
-    assert topics[mailbox.pre] == ['/credential']
+    assert set(topics[mailbox.pre]) == {'/receipt', '/replay', '/reply', '/credential'}
     assert '/credential' in topics[witness.pre]  # The first unread message has no cursor.
     deadline = app.vault.db.mailboxMigrations.get((recipient.pre,)).until
     app.close_vault()
@@ -1696,7 +1835,7 @@ def test_mailbox_migration_preserves_control_topics_and_drain_deadline(ipex_vaul
     topics = app.vault.mbx.receiving_topics(recipient)
     assert '/credential' not in topics[witness.pre]
     assert {'/receipt', '/replay', '/delegate'} <= set(topics[witness.pre])
-    assert topics[mailbox.pre] == ['/credential']
+    assert set(topics[mailbox.pre]) == {'/receipt', '/replay', '/reply', '/credential'}
     app.hby.psr.parse(ims=bytearray(recipient.makeEndRole(
         eid=mailbox.pre, role=kering.Roles.mailbox, allow=False)))
     topics = app.vault.mbx.receiving_topics(recipient)
@@ -1725,8 +1864,10 @@ def test_mailbox_discards_frames_once_parsed(ipex_vaults, monkeypatch, outcome):
     assert not receiver.vault.exc.complete(exn.said)
 
 
-@pytest.mark.parametrize('status', [403, 503])
-def test_mailbox_sse_error_does_not_reset_retry_budget(ipex_vaults, monkeypatch, status):
+@pytest.mark.parametrize('status,content_type,paused', [(403, 'text/event-stream', True),
+                                                       (503, 'text/event-stream', False),
+                                                       (200, 'text/html', True)])
+def test_mailbox_read_failure_survives_reconnect(ipex_vaults, monkeypatch, status, content_type, paused):
     from collections import deque
     from types import SimpleNamespace
     from hio.core.http import clienting
@@ -1739,9 +1880,8 @@ def test_mailbox_sse_error_does_not_reset_retry_budget(ipex_vaults, monkeypatch,
     def connect(*args):
         calls.append(True)
         respondent = clienting.Respondent(msg=bytearray(
-            f'HTTP/1.1 {status} Error\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n'.encode()))
+            f'HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: 0\r\n\r\n'.encode()))
         respondent.parse()
-        assert respondent.evented
         client = SimpleNamespace(respondent=respondent, requests=[], events=deque())
         return client, doing.Doer()
     monkeypatch.setattr(indirecting.agenting, 'httpClient', connect)
@@ -1751,5 +1891,5 @@ def test_mailbox_sse_error_does_not_reset_retry_budget(ipex_vaults, monkeypatch,
         poller.introduced = hab.kever.lastEst
         doing.Doist(tock=0.03125, limit=1).do(doers=[poller])
     state = app.vault.db.connections.get((hab.pre, hab.pre))
-    assert state.paused and not poller.connected
-    assert state.attempts == len(calls) == (1 if status == 403 else 4)
+    assert state.paused == paused and not poller.connected
+    assert state.attempts == len(calls) == (1 if paused else 6)

@@ -5,6 +5,7 @@ locksmith.ui.vault.identifiers.view module
 Dialog for viewing identifier details
 """
 import asyncio
+import time
 
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QTimer
@@ -158,18 +159,26 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
             self.share_button.setEnabled(False)
             return
         endpoints = receiving_endpoints(self.hab)
-        states = [state for _, state in self.vault.db.connections.getTopItemIter(keys=(self.hab.pre,))]
-        errors = [state.error for state in states if state.error]
         ready = receiving_ready(self.vault, self.hab)
         manager = getattr(self.vault, 'plugin_manager', None)
         setup = manager.messaging_status(self.vault, self.hab.pre) if manager else None
-        if setup and setup[1]:
-            errors.append(setup[1])
-        self.receiving_status.setText('Messaging needs attention' if errors else
-                                     'Messaging ready' if ready else 'Setting up messaging')
         details = ([f'Setup: {setup[0]}. {setup[1]}'] if setup else [])
-        details.extend(f'Endpoint: {eid}' for eid in sorted(endpoints))
-        details.extend(f'{state.error} (attempts: {state.attempts}/4)' for state in states if state.error)
+        needs_attention = bool(setup and setup[1])
+        retrying = False
+        for eid in sorted(endpoints):
+            details.append(f'Endpoint: {eid}')
+            state = self.vault.db.connections.get((self.hab.pre, eid))
+            if state and state.error:
+                if state.paused:
+                    needs_attention = True
+                    details.append(f'{state.error}. Polling paused.')
+                else:
+                    retrying = True
+                    wait = max(0, int(state.retry_at - time.time()))
+                    details.append(f'{state.error}. Retrying in {wait}s.' if wait else f'{state.error}. Retrying.')
+        self.receiving_status.setText('Messaging needs attention' if needs_attention else
+                                     'Reconnecting to mailbox' if retrying else
+                                     'Messaging ready' if ready else 'Setting up messaging')
         self.connection_details.setText('\n'.join(details) or 'No receiving address is configured.')
 
     def _cancel_connection(self, *_):
@@ -182,9 +191,17 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
         async def retry():
             self.retry_connection.setEnabled(False)
             try:
-                await ensure_receiving(self.vault, self.hab, retry=True)
+                if self.app.vault is not self.vault or self.vault.closed:
+                    self._refresh_receiving()
+                    return
+                states = (self.vault.db.connections.get((self.hab.pre, eid))
+                          for eid in receiving_endpoints(self.hab))
+                read_failed = any(state and state.error for state in states)
                 self.vault.mbx.retry_receiving(self.hab.pre)
-                self._generate_oobi('mailbox')
+                manager = getattr(self.vault, 'plugin_manager', None)
+                if not read_failed or (manager and manager.messaging_status(self.vault, self.hab.pre)):
+                    await ensure_receiving(self.vault, self.hab, retry=True)
+                    self._generate_oobi('mailbox')
                 self._refresh_receiving()
             except asyncio.CancelledError:
                 raise

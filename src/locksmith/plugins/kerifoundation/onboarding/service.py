@@ -7,7 +7,7 @@ KF onboarding orchestration and boot-backed account transport helpers.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 from urllib.parse import urljoin
 from uuid import uuid4
@@ -18,17 +18,16 @@ import requests
 from keri import help
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE, CESR_DESTINATION_HEADER
 from keri.core import exchange, parsing
+from keri.core.counting import CtrDex_2_0
 from keri.core.serdering import SerderKERI
 from keri.db import dbing
 from keri.help import helping
-from keri.peer import exchanging
-from keri.kering import Kinds, Version, Vrsn_2_0
+from keri.kering import Ilks, KeriError, Kinds, Version, Vrsn_2_0
 from hio.base import doing
 
 from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.core.tasking import await_owned_result
 from locksmith.core.remoting import (
-    introduce_watcher_observed_aid,
     watcher_introduction_doers,
     message_version,
     purge_oobi_resolution_state,
@@ -115,18 +114,6 @@ class OnboardingStartReply:
     state: str = ""
     account_aid: str = ""
     failure_reason: str = ""
-
-
-@dataclass(frozen=True)
-class AccountWitnessRow:
-    eid: str
-    name: str
-    url: str
-    region_id: str = ""
-    region_name: str = ""
-    oobi: str = ""
-    status: str = ""
-    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,107 +219,6 @@ class KFBootClient:
             mailbox_enabled=bootstrap.get("mailbox_enabled") is True,
         )
 
-    def send_ephemeral_inception(self, hab: Any) -> None:
-        msg = hab.msgOwnInception()
-        self._post_cesr(
-            url=self._surfaces.onboarding_url,
-            ims=msg,
-            destination=self._destination(surface="onboarding"),
-            require_reply=False,
-        )
-        self._surface_keystate[("onboarding", hab.pre)] = (
-            hab.kever.sn,
-            hab.kever.serder.said,
-        )
-
-    def start_onboarding(
-        self,
-        hab: Any,
-        *,
-        alias: str,
-        account_aid: str,
-        witness_profile_code: str,
-        region_id: str,
-        watcher_required: bool,
-    ) -> OnboardingStartReply:
-        payload = {
-            "account_alias": alias,
-            "account_aid": account_aid,
-            "chosen_profile_code": witness_profile_code,
-            "region_id": region_id,
-            "watcher_required": watcher_required,
-        }
-        reply = self.send_exn(
-            surface="onboarding",
-            hab=hab,
-            route="/onboarding/session/start",
-            payload=payload,
-        )
-        return self._normalize_start_reply(reply.payload, fallback_region_id=region_id)
-
-    def session_status(
-        self,
-        hab: Any,
-        *,
-        session_id: str,
-        destination: str = "",
-        fallback_region_id: str = "",
-    ) -> OnboardingStartReply:
-        reply = self.send_exn(
-            surface="onboarding",
-            hab=hab,
-            route="/onboarding/session/status",
-            payload={"session_id": session_id},
-            destination=destination,
-        )
-        return self._normalize_start_reply(reply.payload, fallback_region_id=fallback_region_id)
-
-    def create_account(
-        self,
-        hab: Any,
-        *,
-        session_id: str,
-        account_aid: str,
-        alias: str,
-        witness_profile_code: str,
-        witnesses: list[HostedWitnessAllocation],
-        watcher: HostedWatcherAllocation | None,
-        region_id: str,
-    ) -> CesrReply:
-        payload = {
-            "session_id": session_id,
-            "account_aid": account_aid,
-            "account_alias": alias,
-            "chosen_profile_code": witness_profile_code,
-            "region_id": region_id,
-            "witness_eids": [witness.eid for witness in witnesses],
-            "watcher_eid": watcher.eid if watcher is not None else "",
-        }
-        return self.send_exn(
-            surface="onboarding",
-            hab=hab,
-            route="/onboarding/account/create",
-            payload=payload,
-        )
-
-    def complete_onboarding(
-        self,
-        hab: Any,
-        *,
-        session_id: str,
-        account_aid: str,
-    ) -> CesrReply:
-        payload = {
-            "session_id": session_id,
-            "account_aid": account_aid,
-        }
-        return self.send_exn(
-            surface="onboarding",
-            hab=hab,
-            route="/onboarding/complete",
-            payload=payload,
-        )
-
     def cancel_onboarding(
         self,
         hab: Any,
@@ -352,38 +238,6 @@ class KFBootClient:
             route="/onboarding/cancel",
             payload=payload,
         )
-
-    def list_account_witnesses(
-        self,
-        hab: Any,
-        *,
-        account_aid: str,
-        destination: str = "",
-    ) -> list[AccountWitnessRow]:
-        reply = self.send_exn(
-            surface="account",
-            hab=hab,
-            route="/account/witnesses",
-            payload={"account_aid": account_aid},
-            destination=destination,
-        )
-        return self._normalize_witness_rows(reply.payload)
-
-    def list_account_watchers(
-        self,
-        hab: Any,
-        *,
-        account_aid: str,
-        destination: str = "",
-    ) -> list[AccountWatcherRow]:
-        reply = self.send_exn(
-            surface="account",
-            hab=hab,
-            route="/account/watchers",
-            payload={"account_aid": account_aid},
-            destination=destination,
-        )
-        return self._normalize_watcher_rows(reply.payload)
 
     def delete_account(
         self,
@@ -412,29 +266,20 @@ class KFBootClient:
         dest = destination or self._destination(surface=surface)
         if surface == "account":
             self._ensure_surface_keystate(surface=surface, hab=hab, destination=dest)
-        serder = exchange(
-            route=route,
-            attributes=payload,
-            sender=hab.pre,
-            receiver=dest or "",
-            version=Vrsn_2_0,
-            pvrsn=Vrsn_2_0,
-            gvrsn=Vrsn_2_0,
-            kind=Kinds.json,
-        )
-        ims = hab.endorse(serder=serder, last=False, framed=True)
-        attachment = bytearray(ims)
-        del attachment[:serder.size]
-        return self._post_cesr(
-            url=self._surface_url(surface),
-            body=serder.raw,
-            attachment=attachment,
-            destination=dest,
-            require_reply=True,
-            expected_kinds=("rpy", "exn"),
-            expected_route=route,
-            expected_sender=dest or self._boot_server_aid,
-        )
+        request = self._exchange(hab, route, payload, dest)
+        response = self.request_cesr(url=self._surface_url(surface), destination=dest,
+                                     ims=hab.endorse(request, last=False, framed=True))
+        return self._accept_reply(self._app.vault, response, request)
+
+    @staticmethod
+    def _exchange(hab, route, payload, destination):
+        return exchange(route=route, attributes=payload, sender=hab.pre, receiver=destination,
+                        version=Vrsn_2_0, pvrsn=Vrsn_2_0, gvrsn=Vrsn_2_0, kind=Kinds.json)
+
+    def _accept_reply(self, vault, response, request):
+        reply = parse_cesr_http_reply(vault.hby, response, request)
+        self._boot_server_aid = reply.sender
+        return reply
 
     async def send_ephemeral_inception_async(self, hab: Any, *, vault=None) -> None:
         vault = vault or self._app.vault
@@ -445,7 +290,6 @@ class KFBootClient:
             url=self._surfaces.onboarding_url,
             ims=msg,
             destination=self._destination(surface="onboarding"),
-            require_reply=False,
         )
         self._surface_keystate[("onboarding", hab.pre)] = (
             hab.kever.sn,
@@ -582,39 +426,6 @@ class KFBootClient:
         )
         return self._normalize_watcher_rows(reply.payload)
 
-    async def list_account_witnesses_async(
-        self,
-        hab: Any,
-        *,
-        account_aid: str,
-        destination: str = "",
-        vault=None,
-    ) -> list[AccountWitnessRow]:
-        reply = await self.send_exn_async(vault=vault,
-            surface="account",
-            hab=hab,
-            route="/account/witnesses",
-            payload={"account_aid": account_aid},
-            destination=destination,
-        )
-        return self._normalize_witness_rows(reply.payload)
-
-    async def delete_account_async(
-        self,
-        hab: Any,
-        *,
-        account_aid: str,
-        destination: str = "",
-        vault=None,
-    ) -> CesrReply:
-        return await self.send_exn_async(vault=vault,
-            surface="account",
-            hab=hab,
-            route="/account/delete",
-            payload={"account_aid": account_aid},
-            destination=destination,
-        )
-
     async def send_exn_async(
         self,
         *,
@@ -631,62 +442,25 @@ class KFBootClient:
         dest = destination or self._destination(surface=surface)
         if surface == "account":
             await self._ensure_surface_keystate_async(vault=vault, surface=surface, hab=hab, destination=dest)
-        serder = exchange(
-            route=route,
-            attributes=payload,
-            sender=hab.pre,
-            receiver=dest or "",
-            version=Vrsn_2_0,
-            pvrsn=Vrsn_2_0,
-            gvrsn=Vrsn_2_0,
-            kind=Kinds.json,
+        request = self._exchange(hab, route, payload, dest)
+        response = await self._post_cesr_async(
+            vault=vault, url=self._surface_url(surface), destination=dest,
+            ims=hab.endorse(request, last=False, framed=True),
         )
-        ims = hab.endorse(serder=serder, last=False, framed=True)
-        attachment = bytearray(ims)
-        del attachment[:serder.size]
-        return await self._post_cesr_async(vault=vault,
-            url=self._surface_url(surface),
-            body=serder.raw,
-            attachment=attachment,
-            destination=dest,
-            require_reply=True,
-            expected_kinds=("rpy", "exn"),
-            expected_route=route,
-            expected_sender=dest or self._boot_server_aid,
-        )
+        return self._accept_reply(vault, response, request)
 
     async def _ensure_surface_keystate_async(self, *, surface: str, hab: Any, destination: str = "", vault=None) -> None:
-        current_sn = hab.kever.sn
-        current = (current_sn, hab.kever.serder.said)
-        cache_key = (surface, hab.pre)
-        synced = self._surface_keystate.get(cache_key)
-        start_sn = 0
-        if synced is not None:
-            synced_sn, synced_said = synced
-            if (
-                synced_sn <= current_sn
-                and hab.db.kels.getLast(keys=hab.pre, on=synced_sn) == synced_said
-            ):
-                if synced == current:
-                    return
-                start_sn = synced_sn + 1
-
-        for msg in self._iter_surface_keystate_messages(
-            hab=hab,
-            start_sn=start_sn,
-            end_sn=current_sn,
-        ):
+        current, messages = self._pending_keystate(surface, hab)
+        for msg in messages:
             await self._post_cesr_async(vault=vault,
                 url=self._surface_url(surface),
                 ims=msg,
                 destination=destination,
-                require_reply=False,
             )
 
-        self._surface_keystate[cache_key] = current
+        self._surface_keystate[(surface, hab.pre)] = current
 
-    async def _post_cesr_async(self, *, vault=None, require_reply, expected_kinds=(),
-                               expected_route="", expected_sender="", **request):
+    async def _post_cesr_async(self, *, vault=None, **request):
         vault = vault or self._app.vault
         if getattr(vault, "closed", False):
             raise KFBootError("The vault is closed")
@@ -697,45 +471,7 @@ class KFBootClient:
         response = await await_owned_result(asyncio.to_thread(self.request_cesr, **request))
         if getattr(vault, "closed", False) or not vault.hby.db.opened:
             raise KFBootError("The vault is closed")
-        if not require_reply:
-            return None
-        reply = parse_cesr_http_reply(
-            SimpleNamespace(vault=vault), response, expected_kinds=expected_kinds,
-            expected_route=expected_route, expected_sender=expected_sender,
-        )
-        if reply.sender:
-            self._boot_server_aid = reply.sender
-        return reply
-
-    def _post_cesr(
-        self,
-        *,
-        url: str,
-        ims: bytearray | bytes | None = None,
-        body: bytes | bytearray | None = None,
-        attachment: bytes | bytearray | None = None,
-        destination: str = "",
-        require_reply: bool,
-        expected_kinds: tuple[str, ...] = (),
-        expected_route: str = "",
-        expected_sender: str = "",
-    ) -> CesrReply | None:
-        response = self.request_cesr(
-            url=url, ims=ims, body=body, attachment=attachment, destination=destination,
-        )
-        if not require_reply:
-            return None
-
-        reply = parse_cesr_http_reply(
-            self._app,
-            response,
-            expected_kinds=expected_kinds,
-            expected_route=expected_route,
-            expected_sender=expected_sender,
-        )
-        if reply.sender:
-            self._boot_server_aid = reply.sender
-        return reply
+        return response
 
     def request_cesr(self, *, url, ims=None, body=None, attachment=None, destination=""):
         """Send prepared bytes without accessing wallet state. Safe for a worker thread."""
@@ -786,34 +522,26 @@ class KFBootClient:
         return f"Boot service request failed: {status} for {response.url}"
 
     def _ensure_surface_keystate(self, *, surface: str, hab: Any, destination: str = "") -> None:
-        current_sn = hab.kever.sn
-        current = (current_sn, hab.kever.serder.said)
-        cache_key = (surface, hab.pre)
-        synced = self._surface_keystate.get(cache_key)
-        start_sn = 0
-        if synced is not None:
-            synced_sn, synced_said = synced
-            if (
-                synced_sn <= current_sn
-                and hab.db.kels.getLast(keys=hab.pre, on=synced_sn) == synced_said
-            ):
-                if synced == current:
-                    return
-                start_sn = synced_sn + 1
-
-        for msg in self._iter_surface_keystate_messages(
-            hab=hab,
-            start_sn=start_sn,
-            end_sn=current_sn,
-        ):
-            self._post_cesr(
+        current, messages = self._pending_keystate(surface, hab)
+        for msg in messages:
+            self.request_cesr(
                 url=self._surface_url(surface),
                 ims=msg,
                 destination=destination,
-                require_reply=False,
             )
 
-        self._surface_keystate[cache_key] = current
+        self._surface_keystate[(surface, hab.pre)] = current
+
+    def _pending_keystate(self, surface, hab):
+        current = (hab.kever.sn, hab.kever.serder.said)
+        synced = self._surface_keystate.get((surface, hab.pre))
+        start_sn = 0
+        if synced is not None:
+            sn, said = synced
+            if sn <= current[0] and hab.db.kels.getLast(keys=hab.pre, on=sn) == said:
+                start_sn = sn + 1
+        messages = self._iter_surface_keystate_messages(hab=hab, start_sn=start_sn, end_sn=current[0])
+        return current, messages
 
     @staticmethod
     def _iter_surface_keystate_messages(*, hab: Any, start_sn: int, end_sn: int):
@@ -909,23 +637,6 @@ class KFBootClient:
             region_name=str(raw.get("region_name", "") or ""),
             status=str(raw.get("status", "") or ""),
         )
-
-    def _normalize_witness_rows(self, payload: dict[str, Any]) -> list[AccountWitnessRow]:
-        rows = []
-        for entry in _rows_from_payload(payload, "witnesses"):
-            rows.append(
-                AccountWitnessRow(
-                    eid=str(entry.get("eid", "") or ""),
-                    name=str(entry.get("name", "") or ""),
-                    url=str(entry.get("url") or entry.get("witness_url") or ""),
-                    region_id=str(entry.get("region_id", "") or ""),
-                    region_name=str(entry.get("region_name", "") or ""),
-                    oobi=_pick_oobi(entry),
-                    status=str(entry.get("status", "") or ""),
-                    created_at=str(entry.get("created_at", "") or ""),
-                )
-            )
-        return rows
 
     def _normalize_watcher_rows(self, payload: dict[str, Any]) -> list[AccountWatcherRow]:
         rows = []
@@ -1633,59 +1344,6 @@ class KFOnboardingService:
 
         return True
 
-    def _rotate_account_to_allocated_witnesses_blocking(
-        self,
-        *,
-        hab: Any,
-        registration: HostedWitnessRegistration,
-        allocated_witness_eids: list[str],
-        toad: int,
-        rotate: bool = True,
-    ) -> None:
-        auths = self._build_witness_auths(registration)
-        if len(allocated_witness_eids) == 1:
-            witness_eid = allocated_witness_eids[0]
-            witness_url = self._single_witness_url(registration=registration, witness_eid=witness_eid)
-            try:
-                if rotate:
-                    hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
-                self._receipt_single_witness_rotation(
-                    hab=hab,
-                    witness_eid=witness_eid,
-                    witness_url=witness_url,
-                    auth=auths.get(witness_eid, ""),
-                )
-            except Exception as exc:
-                raise KFBootError(f"Failed rotating the local account AID onto hosted witnesses: {exc}") from exc
-            return
-
-        receiptor = LocksmithReceiptor(hby=self._app.vault.hby)
-
-        def rotate_and_receipt(tymth, tock=0.0, **opts):
-            _ = opts
-            receiptor.wind(tymth)
-            _ = (yield tock)
-            try:
-                if rotate:
-                    hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
-                yield from receiptor.receipt(hab.pre, sn=hab.kever.sn, auths=auths)
-            finally:
-                receiptor.remove(list(receiptor.doers))
-            return
-
-        runner = doing.doify(rotate_and_receipt)
-        try:
-            doing.Doist(tock=0.03125, real=True).do(doers=[receiptor, runner], limit=30.0)
-        except Exception as exc:
-            raise KFBootError(f"Failed rotating the local account AID onto hosted witnesses: {exc}") from exc
-
-        dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
-        wigs = hab.db.wigs.get(keys=dgkey) or []
-        if len(wigs) < toad:
-            raise KFBootError(
-                f"Insufficient witness receipts after rotation: got {len(wigs)}, need {toad}"
-            )
-
     async def _rotate_account_to_allocated_witnesses_async(
         self,
         *,
@@ -1794,44 +1452,6 @@ class KFOnboardingService:
         dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
         if len(hab.db.wigs.get(keys=dgkey) or []) < hab.kever.toader.num:
             raise KFBootError("Insufficient witness receipts after rotation")
-
-    def _receipt_single_witness_rotation(
-        self,
-        *,
-        hab: Any,
-        witness_eid: str,
-        witness_url: str,
-        auth: str,
-    ) -> None:
-        msg = bytearray(hab.msgOwnEvent(sn=hab.kever.sn))
-        serder = SerderKERI(raw=bytearray(msg))
-        attachments = bytes(msg[serder.size:])
-        headers = {
-            "Content-Type": CESR_CONTENT_TYPE,
-            CESR_ATTACHMENT_HEADER: attachments.decode("utf-8"),
-            CESR_DESTINATION_HEADER: witness_eid,
-        }
-        if auth:
-            headers["Authorization"] = auth
-
-        response = requests.post(
-            urljoin(witness_url.rstrip("/") + "/", "receipts"),
-            headers=headers,
-            data=bytes(serder.raw),
-            timeout=15,
-        )
-        if response.status_code != 200:
-            raise KFBootError(
-                f"Witness {witness_eid} rejected the rotation event with status {response.status_code}"
-            )
-
-        hab.psr.parseOne(ims=bytearray(response.content), version=message_version(response.content))
-        dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
-        wigs = hab.db.wigs.get(keys=dgkey)
-        if len(wigs) < hab.kever.toader.num:
-            raise KFBootError(
-                f"Insufficient witness receipts after rotation: got {len(wigs)}, need {hab.kever.toader.num}"
-            )
 
     @staticmethod
     def _single_witness_url(*, registration: HostedWitnessRegistration, witness_eid: str) -> str:
@@ -2011,26 +1631,6 @@ class KFOnboardingService:
         except Exception:
             logger.warning("Failed abandoning KF onboarding session %s", start.session_id, exc_info=True)
 
-    def _cancel_onboarding_session(
-        self,
-        *,
-        ehab: Any | None,
-        start: OnboardingStartReply | None,
-        account_hab: Any | None,
-    ) -> None:
-        if start is None or ehab is None:
-            return
-
-        try:
-            self._boot_client.cancel_onboarding(
-                ehab,
-                session_id=start.session_id,
-                account_aid=getattr(account_hab, "pre", "") if account_hab is not None else "",
-                reason="client_abandoned",
-            )
-        except Exception:
-            logger.warning("Failed abandoning KF onboarding session %s", start.session_id, exc_info=True)
-
     def _clear_abandoned_onboarding_state(
         self,
         *,
@@ -2161,24 +1761,6 @@ class KFOnboardingService:
                 yield tock
 
         await self._run_vault_doer(deliver, children=doers, timeout=10)
-
-    def _introduce_account_to_watcher(
-        self,
-        *,
-        account_hab: Any,
-        watcher: HostedWatcherAllocation,
-        witnesses: list[HostedWitnessAllocation],
-    ) -> None:
-        introduce_watcher_observed_aid(
-            self._app,
-            hab=account_hab,
-            watcher_eid=watcher.eid,
-            observed_aid=account_hab.pre,
-            observed_oobis=self._account_witness_oobis(
-                account_aid=account_hab.pre,
-                witnesses=witnesses,
-            ),
-        )
 
     @staticmethod
     def _account_witness_oobis(*, account_aid: str, witnesses: list[HostedWitnessAllocation]) -> list[str]:
@@ -2330,95 +1912,53 @@ def split_cesr_message(ims: bytearray | bytes) -> tuple[bytes, bytes]:
     return body, attachment
 
 
-def parse_cesr_http_reply(
-    app: Any,
-    response: requests.Response,
-    *,
-    expected_kinds: tuple[str, ...] = (),
-    expected_route: str = "",
-    expected_sender: str = "",
-    expected_request: str = "",
-    expected_recipient: str = "",
-) -> CesrReply:
-    """Parse a CESR-over-HTTP reply and return the last KERI message payload."""
+def parse_cesr_http_reply(hby, response: requests.Response, request: SerderKERI) -> CesrReply:
+    """Verify the Boot KEL and the exchange addressed to this request's sender."""
     ims = bytearray(response.content or b"")
-    attachment = response.headers.get(CESR_ATTACHMENT_HEADER, "")
-    if attachment:
-        ims.extend(attachment.encode("utf-8"))
+    ims.extend(response.headers.get(CESR_ATTACHMENT_HEADER, "").encode("utf-8"))
     if not ims:
         raise KFBootError("Authenticated boot reply was empty")
 
-    parser = parsing.Parser(
-        kvy=app.vault.hby.kvy,
-        rvy=app.vault.hby.rvy,
-        exc=app.vault.hby.exc,
-        local=False,
-        version=message_version(ims),
-    )
-    parser.parse(ims=bytearray(ims))
-    app.vault.hby.kvy.processEscrows()
+    try:
+        version = message_version(ims)
+        if version.major == 1:
+            # Boot replays old KEL bodies with its current CESR attachment groups.
+            first = SerderKERI(raw=ims)
+            groups = (CtrDex_2_0.AttachmentGroup.encode(), CtrDex_2_0.BigAttachmentGroup.encode())
+            if first.ilk != Ilks.exn and ims.startswith(groups, first.size):
+                version = Vrsn_2_0
+        parser = parsing.Parser(version=version, local=False)
+        while ims:
+            parsed = parser.parseOneBare(ims=ims, processive=False)
+            reply = parsed.serder
+            if ims:
+                if reply.ilk not in (Ilks.icp, Ilks.rot, Ilks.ixn, Ilks.dip, Ilks.drt):
+                    raise KFBootError("Expected key history before the boot reply")
+            else:
+                if reply.ilk != Ilks.exn or reply.route != request.route:
+                    raise KFBootError("Boot reply does not match the requested exchange route")
+                if request.sad["ri"] and reply.pre != request.sad["ri"]:
+                    raise KFBootError("Boot reply did not come from the expected service")
+                if reply.sad.get("ri", reply.sad.get("rp")) != request.pre:
+                    raise KFBootError("Boot reply does not match the requesting identifier")
+            # Verify this frame's attachments even if this SAID is already in the vault.
+            parser.msgProcess(exts=asdict(parsed), kvy=hby.kvy, exc=hby.exc, rvy=None, tvy=None, vry=None)
+    except (KeriError, ValueError) as exc:
+        raise KFBootError("Boot reply could not be authenticated") from exc
 
-    serders = split_cesr_stream(ims)
-    if not serders:
-        raise KFBootError("Unable to parse a KERI message from boot reply")
-
-    last = serders[-1]
-    ilk = str(last.ked.get("t", "") or "")
-    if expected_kinds and ilk not in expected_kinds:
-        expected = ", ".join(expected_kinds)
-        raise KFBootError(f"Boot reply had unexpected ilk '{ilk}', expected {expected}")
-
-    route = str(last.ked.get("r", "") or "")
-    if expected_route and route != expected_route:
-        raise KFBootError(
-            f"Boot reply had unexpected route '{route}', expected '{expected_route}'"
-        )
-
-    sender = getattr(last, "pre", "") or last.ked.get("i", "")
-    if expected_sender and not sender:
-        raise KFBootError("Boot reply did not include a verifiable sender AID")
-    if expected_sender and sender != expected_sender:
-        raise KFBootError(
-            f"Boot reply sender {sender} did not match expected boot service {expected_sender}"
-        )
-    if sender and sender not in app.vault.hby.kevers:
-        raise KFBootError(f"Boot reply sender {sender} is not verifiable after parsing the prepended KEL")
-
-    payload = last.ked.get("a", {})
+    if not hby.db.exns.get((reply.said,)):
+        raise KFBootError("Boot reply exchange was not accepted")
+    payload = reply.sad["a"]
     if not isinstance(payload, dict):
-        payload = {}
-    if expected_request:
-        accepted = app.vault.hby.db.exns.get(keys=(last.said,))
-        if ilk != "exn" or accepted is None or accepted.raw != last.raw:
-            raise KFBootError("Boot reply exchange was not authenticated")
-        try:
-            exchanging.verify(app.vault.hby, last)
-        except Exception as exc:
-            raise KFBootError("Boot reply signature verification failed") from exc
-        if payload.get("request_said") != expected_request:
-            raise KFBootError("Boot reply does not match the mailbox request")
-        if last.ked.get("ri") != expected_recipient:
-            raise KFBootError("Boot reply does not match the requesting account")
-    return CesrReply(
-        ilk=ilk,
-        route=route,
-        sender=str(sender or ""),
-        said=str(last.said or ""),
-        payload=payload,
-    )
-
-
-def split_cesr_stream(ims: bytes | bytearray) -> list[SerderKERI]:
-    """Split a JSON CESR stream into KERI serders."""
-    serders: list[SerderKERI] = []
-    buf = bytearray(ims)
-    while buf:
-        serder = SerderKERI(raw=bytes(buf))
-        serders.append(serder)
-        del buf[:serder.size]
-        while buf and buf[0] != 0x7B:  # '{' starts the next JSON-encoded message
-            del buf[:1]
-    return serders
+        raise KFBootError("Boot reply attributes must be a map")
+    if request.route.startswith("/account/mailboxes") or request.route == "/operations/status":
+        if payload.get("request_said") != request.said:
+            raise KFBootError("Boot reply does not match the request")
+    else:
+        for key in ("session_id", "account_aid"):
+            if key in request.sad["a"] and payload.get(key) != request.sad["a"][key]:
+                raise KFBootError(f"Boot reply has a different {key}")
+    return CesrReply(ilk=reply.ilk, route=reply.route, sender=reply.pre, said=reply.said, payload=payload)
 
 
 def _rows_from_payload(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:

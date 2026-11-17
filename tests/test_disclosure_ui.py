@@ -24,7 +24,7 @@ from test_credential_ui import schema as credential_schema
 def disclosure_schemas():
     directory = Path(__file__).parents[1] / 'assets' / 'schemas' / 'sedi'
     return {name: json.loads((directory / f'{name}.json').read_text())
-            for name in ('bespoke-presentation', 'core-identity', 'age')}
+            for name in ('bespoke-presentation', 'core-identity', 'age', 'social-authorization')}
 
 
 def choose(combo, value):
@@ -66,25 +66,28 @@ def test_holder_sees_every_claim_coupled_to_required_information(qapp, disclosur
 
 
 def test_bespoke_request_keeps_choices_and_orders_source_links(qapp, disclosure_schemas):
-    root, core, age = (disclosure_schemas[name] for name in ('bespoke-presentation', 'core-identity', 'age'))
+    root, core, age, social = (disclosure_schemas[name] for name in
+                               ('bespoke-presentation', 'core-identity', 'age', 'social-authorization'))
     schemas = {schema['$id']: SimpleNamespace(sed=schema) for schema in disclosure_schemas.values()}
     request = RequestDisclosure(root, schemas)
     for slot, schema, path in (('age', age, 'A/over13'), ('core', core, 'a/givenName/value')):
         choose(request.add_information, slot)
-        choose(request.links[slot]['selector'], schema['$id'])
         request.links[slot]['fields'][schema['$id']].checkboxes[path].setChecked(True)
+    choose(request.add_information, 'social')
     choose(request.links['core']['selector'], age['$id'])
     choose(request.links['core']['selector'], core['$id'])
     assert request.disclosure_plan(root['$id']) == [[
         [root['$id'], '/', []],
         [core['$id'], '/e/core/_/', ['a/givenName/value', 'a/i']],
         [age['$id'], '/e/age/_/', ['A/over13', 'A/i']],
+        [social['$id'], '/e/social/_/', []],
     ]]
     request._remove_link('core')
     assert request.add_information.combo_box.findData('core') >= 0
     assert request.disclosure_plan(root['$id']) == [[
         [root['$id'], '/', []],
         [age['$id'], '/e/age/_/', ['A/over13', 'A/i']],
+        [social['$id'], '/e/social/_/', []],
     ]]
 
 
@@ -107,10 +110,13 @@ def test_incomplete_link_blocks_send_and_root_switch_keeps_selection(qapp, walle
     assert dialog.send_button.isEnabled(), dialog.error.text()
     request = dialog._requests[root['$id']]
     choose(request.add_information, 'core')
+    assert dialog.send_button.isEnabled(), dialog.error.text()
+    selector = request.links['core']['selector']
+    assert selector.currentData() == core['$id'] and selector.isEnabled()
+    choose(selector, None)
     assert not dialog.send_button.isEnabled()
     assert dialog.error.text()
-    assert request.links['core']['selector'].isEnabled()
-    choose(request.links['core']['selector'], core['$id'])
+    choose(selector, core['$id'])
     # Browsing built-in credential types leaves the vault unchanged until Send.
     assert not list(app.hby.db.schema.getTopItemIter())
     request.links['core']['fields'][core['$id']].checkboxes['a/givenName/value'].setChecked(True)

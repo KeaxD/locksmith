@@ -48,7 +48,8 @@ Git-sourced Keripy.
 Dependency Updates
 ------------------
 
-To adopt a newer upstream Keripy commit and its required package versions:
+To adopt a new Keripy commit, change the Git SHA in ``pyproject.toml``.
+Update the lockfile and install it with these commands.
 
 .. code-block:: bash
 

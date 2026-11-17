@@ -12,6 +12,7 @@ from keri.core import coring, signing
 from keri.core.serdering import SerderKERI
 from keri.acdc import registraring
 
+from locksmith.core.messaging import unpublished_mailboxes
 from locksmith.core.vaulting import run_vault_controller
 from locksmith.core.grouping import GroupMultisigInceptDoer
 
@@ -859,8 +860,9 @@ def generate_oobi(app, hab, role='witness'):
                     oobis.append(urljoin(up.geturl(), f'/oobi/{hab.pre}/controller'))
 
         elif role == 'mailbox':
+            unpublished = unpublished_mailboxes(app.vault, hab.pre)
             for (_, _, eid), end in hab.db.ends.getTopItemIter(keys=(hab.pre, kering.Roles.mailbox)):
-                if not end.allowed:
+                if not end.allowed or eid in unpublished:
                     continue
                 urls = hab.fetchUrls(eid=eid, scheme="")
                 url = urls.get(kering.Schemes.https) or urls.get(kering.Schemes.http)

@@ -7,13 +7,7 @@ Functions and services for resolving OOBIs and managing remote identifiers
 import asyncio
 import datetime
 import time
-from typing import TYPE_CHECKING
 from urllib.parse import urlparse
-
-from keri.app.forwarding import StreamPoster
-
-if TYPE_CHECKING:
-    pass
 
 from hio.base import doing
 from hio.core.http import clienting
@@ -26,7 +20,7 @@ from keri.core.serdering import SerderKERI
 from keri.db import basing, fetchTsgs
 from keri.help import helping
 from mnemonic import Mnemonic
-from locksmith.core.messaging import RETRY_DELAYS
+from locksmith.core.messaging import RETRY_DELAYS, unpublished_mailboxes
 from locksmith.db.basing import ConnectionRecord
 
 logger = help.ogler.getLogger(__name__)
@@ -123,7 +117,7 @@ def message_version(ims: bytes | bytearray) -> kering.Versionage:
     return kering.Vrsn_2_0
 
 
-def identifier_introduction(hab) -> bytes:
+def identifier_introduction(hab, *, vault=None) -> bytes:
     """Export public key history and retained, signed delivery information."""
     version = kering.Vrsn_2_0
     stream = bytearray()
@@ -131,8 +125,9 @@ def identifier_introduction(hab) -> bytes:
     # the first event. Never include private keys or unrelated contacts.
     for message in hab.db.clonePreIter(pre=hab.pre, gvrsn=version):
         stream.extend(message)
+    unpublished = unpublished_mailboxes(vault, hab.pre)
     roles = [(role, eid) for (_, role, eid), end in hab.db.ends.getTopItemIter(keys=(hab.pre,))
-             if end.allowed or end.enabled]
+             if (end.allowed or end.enabled) and not (role == kering.Roles.mailbox and eid in unpublished)]
     endpoints = dict.fromkeys([*hab.kever.wits, *(eid for _, eid in roles)])
     for eid in endpoints:
         if eid != hab.pre and eid in hab.kevers:
@@ -140,8 +135,10 @@ def identifier_introduction(hab) -> bytes:
         stream.extend(hab.loadLocScheme(eid=eid, gvrsn=version))
     # loadEndRole omits revoked roles. Export each latest accepted reply,
     # including cuts, with its retained signatures so imports remove old routes.
-    for _, said in hab.db.eans.getTopItemIter(keys=(hab.pre,)):
+    for (_, role, eid), said in hab.db.eans.getTopItemIter(keys=(hab.pre,)):
         serder = hab.db.rpys.get(keys=(said.qb64,))
+        if role == kering.Roles.mailbox and eid in unpublished and serder.route == '/end/role/add':
+            continue
         cigars = []
         for verfer, cigar in hab.db.scgs.get(keys=(said.qb64,)):
             cigar.verfer = verfer
@@ -307,7 +304,6 @@ def watcher_introduction_doers(
     watcher_eid: str,
     observed_aid: str,
     observed_oobis: list[str],
-    timeout_seconds: float = 10.0,
 ) -> list:
     """Send the local controller KEL and watcher-add reply to a hosted watcher."""
 
@@ -353,26 +349,6 @@ def watcher_introduction_doers(
         postman.send(serder=serder, attachment=raw[serder.size:])
 
     return postman.deliver()
-
-def introduce_watcher_observed_aid(
-    app,
-    *,
-    hab,
-    watcher_eid: str,
-    observed_aid: str,
-    observed_oobis: list[str],
-    timeout_seconds: float = 10.0,
-) -> None:
-    """Send the local controller KEL and watcher-add reply to a hosted watcher."""
-
-    doers = watcher_introduction_doers(
-        app, hab=hab, watcher_eid=watcher_eid, observed_aid=observed_aid, observed_oobis=observed_oobis,
-    )
-    doer = doing.DoDoer(doers=doers)
-    try:
-        doing.Doist(tock=0.03125, real=True).do(doers=[doer], limit=timeout_seconds)
-    except Exception as exc:
-        raise ValueError(f"Failed introducing observed AID {observed_aid} to watcher {watcher_eid}: {exc}") from exc
 
 
 async def resolve_oobi(
@@ -1120,7 +1096,7 @@ class ChallengeVerificationDoer(doing.DoDoer):
             sender_hab = hab.mhab if isinstance(hab, GroupHab) else hab
 
             # Send via postman
-            postman = StreamPoster(hby=self.app.vault.hby, recp=self.remote_id_pre, hab=sender_hab, topic="challenge")
+            postman = forwarding.StreamPoster(hby=self.app.vault.hby, recp=self.remote_id_pre, hab=sender_hab, topic="challenge")
             postman.send(
                 serder=exn,
                 attachment=ims

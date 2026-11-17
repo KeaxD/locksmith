@@ -125,6 +125,7 @@ def test_selected_aggregate_exchange_preserves_source_and_reopens(ipex_vaults):
             ('age', source_schema, ('A/over13', 'A/over18'))):
         request_fields.add_information.setCurrentIndex(request_fields.add_information.combo_box.findData(slot))
         selector = request_fields.links[slot]['selector']
+        assert selector.currentData() is None  # This custom schema leaves the source open.
         selector.setCurrentIndex(selector.combo_box.findData(schema.said))
         for path in paths:
             request_fields.links[slot]['fields'][schema.said].checkboxes[path].click()
