@@ -41,7 +41,8 @@ Run the tests, lint, and dependency checks:
    uv run --locked pytest tests/
    uv run --locked pip-audit --local --skip-editable
 
-CI audits dependency changes; the audit workflow can also run manually.
+To run the audit on GitHub, open **Actions**, select **Audit locked dependencies**,
+and choose **Run workflow**.
 The audit checks published package advisories and skips Locksmith and
 Git-sourced Keripy.
 
